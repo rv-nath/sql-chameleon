@@ -1,0 +1,8 @@
+[package]
+name = "schema-conv"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sqlparser = "0.52"
+clap = { version = "4", features = ["derive"] }
