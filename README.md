@@ -1,4 +1,7 @@
 #  SQL Chameleon
+
+[![tests](https://img.shields.io/github/actions/workflow/status/rv-nath/sql-chameleon/rust.yml?branch=main&label=tests&logo=github)](https://github.com/rv-nath/sql-chameleon/actions)
+
 A command line tool for converting any bunch of sql (mostly DDL)
 to a specified target dialect.  For example, convert from MySQL to Oracle or vice versa.
 
