@@ -9,17 +9,25 @@ fn main() {
     for (i, stmt) in stmts.iter().enumerate() {
         match stmt {
             sqlparser::ast::Statement::CreateTable(ct) => {
-                println!("Table {}: {} ({} cols, {} constraints)", 
-                    i+1, ct.name, ct.columns.len(), ct.constraints.len());
-                
+                println!(
+                    "Table {}: {} ({} cols, {} constraints)",
+                    i + 1,
+                    ct.name,
+                    ct.columns.len(),
+                    ct.constraints.len()
+                );
+
                 // Check for tricky features
                 for col in &ct.columns {
                     let dt = format!("{:?}", col.data_type);
                     for opt in &col.options {
                         let opt_str = format!("{:?}", opt.option);
                         if opt_str.contains("DialectSpecific") || opt_str.contains("OnUpdate") {
-                            println!("  → {}: special option: {}", col.name.value, 
-                                opt_str.chars().take(80).collect::<String>());
+                            println!(
+                                "  → {}: special option: {}",
+                                col.name.value,
+                                opt_str.chars().take(80).collect::<String>()
+                            );
                         }
                     }
                     // Check for tinyint(1)

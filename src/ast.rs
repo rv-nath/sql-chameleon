@@ -43,8 +43,13 @@ pub enum StringType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TemporalType {
     Date,
-    Time { precision: Option<u8> },
-    Timestamp { precision: Option<u8>, with_timezone: bool },
+    Time {
+        precision: Option<u8>,
+    },
+    Timestamp {
+        precision: Option<u8>,
+        with_timezone: bool,
+    },
 }
 
 /// Unified data type enum
@@ -218,6 +223,38 @@ pub enum Statement {
     Commit,
     SetVariable {
         raw_sql: String,
+    },
+    CreateSequence {
+        name: String,
+        start_with: Option<i64>,
+        increment_by: Option<i64>,
+        min_value: Option<i64>,
+        max_value: Option<i64>,
+        cache: Option<u64>,
+        no_cache: bool,
+        cycle: bool,
+    },
+    CreateTrigger {
+        name: String,
+        table: String,
+        body: String,
+    },
+    CreateSynonym {
+        name: String,
+        target: String,
+        is_public: bool,
+    },
+    Grant {
+        raw_sql: String,
+    },
+    Revoke {
+        raw_sql: String,
+    },
+    CreateView {
+        name: String,
+        or_replace: bool,
+        columns: Option<Vec<String>>,
+        query: String,
     },
     /// Pass-through for DML and other statements where the syntax
     /// is identical (or close enough) across dialects (e.g., UPDATE, DELETE)

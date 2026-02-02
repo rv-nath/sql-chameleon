@@ -1,11 +1,11 @@
 // MySQL Emitter
 
+use super::SqlEmitter;
 use crate::ast::{
-    Column, Constraint, DataType, DefaultValue, Dialect, IntegerType,
-    ReferentialAction, Statement, StringType, Table, TemporalType,
+    Column, Constraint, DataType, DefaultValue, Dialect, IntegerType, ReferentialAction, Statement,
+    StringType, Table, TemporalType,
 };
 use crate::error::EmitError;
-use super::SqlEmitter;
 
 /// Emitter for MySQL SQL dialect
 pub struct MySqlEmitter;
@@ -24,13 +24,26 @@ impl SqlEmitter for MySqlEmitter {
     fn emit_statement(&self, stmt: &Statement) -> Result<String, EmitError> {
         match stmt {
             Statement::CreateTable(table) => self.emit_create_table(table),
-            Statement::DropTable { name, if_exists, cascade } => {
-                self.emit_drop_table(name, *if_exists, *cascade)
-            }
-            Statement::CreateIndex { name, table, columns, unique } => {
+            Statement::DropTable {
+                name,
+                if_exists,
+                cascade,
+            } => self.emit_drop_table(name, *if_exists, *cascade),
+            Statement::CreateIndex {
+                name,
+                table,
+                columns,
+                unique,
+            } => {
                 let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
                 let unique_str = if *unique { "UNIQUE " } else { "" };
-                Ok(format!("CREATE {}INDEX {} ON {} ({});", unique_str, name, table, cols.join(", ")))
+                Ok(format!(
+                    "CREATE {}INDEX {} ON {} ({});",
+                    unique_str,
+                    name,
+                    table,
+                    cols.join(", ")
+                ))
             }
             Statement::LockTables { tables } => {
                 let parts: Vec<String> = tables
@@ -45,16 +58,17 @@ impl SqlEmitter for MySqlEmitter {
                     .collect();
                 Ok(format!("LOCK TABLES {};", parts.join(", ")))
             }
-            Statement::UnlockTables => {
-                Ok("UNLOCK TABLES;".to_string())
-            }
-            Statement::Insert { table, columns, values } => {
-                self.emit_insert(table, columns, values)
-            }
-            Statement::Use { database } => {
-                Ok(format!("USE {};", database))
-            }
-            Statement::CreateDatabase { name, if_not_exists } => {
+            Statement::UnlockTables => Ok("UNLOCK TABLES;".to_string()),
+            Statement::Insert {
+                table,
+                columns,
+                values,
+            } => self.emit_insert(table, columns, values),
+            Statement::Use { database } => Ok(format!("USE {};", database)),
+            Statement::CreateDatabase {
+                name,
+                if_not_exists,
+            } => {
                 if *if_not_exists {
                     Ok(format!("CREATE DATABASE IF NOT EXISTS {};", name))
                 } else {
@@ -63,8 +77,37 @@ impl SqlEmitter for MySqlEmitter {
             }
             Statement::Commit => Ok("COMMIT;".to_string()),
             Statement::SetVariable { raw_sql } => Ok(format!("{};", raw_sql)),
-            Statement::AlterTable { name, operations } => {
-                self.emit_alter_table(name, operations)
+            Statement::AlterTable { name, operations } => self.emit_alter_table(name, operations),
+            Statement::CreateSequence { name, .. } => Ok(format!(
+                "-- CREATE SEQUENCE {} (not supported in MySQL)",
+                name
+            )),
+            Statement::CreateTrigger { name, .. } => Ok(format!(
+                "-- CREATE TRIGGER {} (Oracle PL/SQL, not translatable)",
+                name
+            )),
+            Statement::CreateSynonym { name, .. } => Ok(format!(
+                "-- CREATE SYNONYM {} (not supported in MySQL)",
+                name
+            )),
+            Statement::Grant { raw_sql } | Statement::Revoke { raw_sql } => {
+                Ok(format!("-- {};", raw_sql))
+            }
+            Statement::CreateView {
+                name,
+                or_replace,
+                columns,
+                query,
+            } => {
+                let replace_str = if *or_replace { "OR REPLACE " } else { "" };
+                let col_str = match columns {
+                    Some(cols) => format!(" ({})", cols.join(", ")),
+                    None => String::new(),
+                };
+                Ok(format!(
+                    "CREATE {}VIEW {}{} AS\n{};",
+                    replace_str, name, col_str, query
+                ))
             }
             Statement::RawStatement { raw_sql } => Ok(format!("{};", raw_sql)),
         }
@@ -73,7 +116,12 @@ impl SqlEmitter for MySqlEmitter {
 
 // DROP TABLE
 impl MySqlEmitter {
-    fn emit_drop_table(&self, name: &str, if_exists: bool, _cascade: bool) -> Result<String, EmitError> {
+    fn emit_drop_table(
+        &self,
+        name: &str,
+        if_exists: bool,
+        _cascade: bool,
+    ) -> Result<String, EmitError> {
         let sql = if if_exists {
             format!("DROP TABLE IF EXISTS {};", name)
         } else {
@@ -138,16 +186,27 @@ impl MySqlEmitter {
             .iter()
             .map(|op| match op {
                 crate::ast::AlterOperation::AddColumn(col) => {
-                    format!("ALTER TABLE {} ADD COLUMN {};", table, self.emit_column(col).trim())
+                    format!(
+                        "ALTER TABLE {} ADD COLUMN {};",
+                        table,
+                        self.emit_column(col).trim()
+                    )
                 }
                 crate::ast::AlterOperation::ModifyColumn(col) => {
-                    format!("ALTER TABLE {} MODIFY COLUMN {};", table, self.emit_column(col).trim())
+                    format!(
+                        "ALTER TABLE {} MODIFY COLUMN {};",
+                        table,
+                        self.emit_column(col).trim()
+                    )
                 }
                 crate::ast::AlterOperation::DropColumn { name } => {
                     format!("ALTER TABLE {} DROP COLUMN {};", table, name)
                 }
                 crate::ast::AlterOperation::RenameColumn { old_name, new_name } => {
-                    format!("ALTER TABLE {} RENAME COLUMN {} TO {};", table, old_name, new_name)
+                    format!(
+                        "ALTER TABLE {} RENAME COLUMN {} TO {};",
+                        table, old_name, new_name
+                    )
                 }
                 crate::ast::AlterOperation::AddConstraint(constraint) => {
                     match self.emit_constraint(constraint) {
@@ -225,8 +284,14 @@ impl MySqlEmitter {
                 let ref_cols = ref_columns.join(", ");
 
                 let mut fk = match name {
-                    Some(n) => format!("  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})", n, cols, ref_table, ref_cols),
-                    None => format!("  FOREIGN KEY ({}) REFERENCES {}({})", cols, ref_table, ref_cols),
+                    Some(n) => format!(
+                        "  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
+                        n, cols, ref_table, ref_cols
+                    ),
+                    None => format!(
+                        "  FOREIGN KEY ({}) REFERENCES {}({})",
+                        cols, ref_table, ref_cols
+                    ),
                 };
 
                 if let Some(action) = on_delete {
@@ -240,7 +305,11 @@ impl MySqlEmitter {
                 Some(fk)
             }
 
-            Constraint::Index { name, columns, unique } => {
+            Constraint::Index {
+                name,
+                columns,
+                unique,
+            } => {
                 let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
                 let keyword = if *unique { "UNIQUE KEY" } else { "KEY" };
                 Some(format!("  {} {} ({})", keyword, name, cols.join(", ")))
@@ -319,29 +388,23 @@ impl MySqlEmitter {
             // Strings
             DataType::String(StringType::Char { length }) => format!("CHAR({})", length),
             DataType::String(StringType::Varchar { length }) => format!("VARCHAR({})", length),
-            DataType::String(StringType::Text { max_bytes }) => {
-                match max_bytes {
-                    Some(n) if *n <= 255 => "TINYTEXT".to_string(),
-                    Some(n) if *n <= 65_535 => "TEXT".to_string(),
-                    Some(n) if *n <= 16_777_215 => "MEDIUMTEXT".to_string(),
-                    _ => "LONGTEXT".to_string(),
-                }
-            }
+            DataType::String(StringType::Text { max_bytes }) => match max_bytes {
+                Some(n) if *n <= 255 => "TINYTEXT".to_string(),
+                Some(n) if *n <= 65_535 => "TEXT".to_string(),
+                Some(n) if *n <= 16_777_215 => "MEDIUMTEXT".to_string(),
+                _ => "LONGTEXT".to_string(),
+            },
 
             // Temporal
             DataType::Temporal(TemporalType::Date) => "DATE".to_string(),
-            DataType::Temporal(TemporalType::Time { precision }) => {
-                match precision {
-                    Some(p) => format!("TIME({})", p),
-                    None => "TIME".to_string(),
-                }
-            }
-            DataType::Temporal(TemporalType::Timestamp { precision, .. }) => {
-                match precision {
-                    Some(p) => format!("DATETIME({})", p),
-                    None => "DATETIME".to_string(),
-                }
-            }
+            DataType::Temporal(TemporalType::Time { precision }) => match precision {
+                Some(p) => format!("TIME({})", p),
+                None => "TIME".to_string(),
+            },
+            DataType::Temporal(TemporalType::Timestamp { precision, .. }) => match precision {
+                Some(p) => format!("DATETIME({})", p),
+                None => "DATETIME".to_string(),
+            },
 
             // Decimal
             DataType::Decimal { precision, scale } => format!("DECIMAL({},{})", precision, scale),
@@ -353,12 +416,10 @@ impl MySqlEmitter {
             DataType::Float => "DOUBLE".to_string(),
 
             // Binary
-            DataType::Binary { length } => {
-                match length {
-                    Some(l) => format!("VARBINARY({})", l),
-                    None => "LONGBLOB".to_string(),
-                }
-            }
+            DataType::Binary { length } => match length {
+                Some(l) => format!("VARBINARY({})", l),
+                None => "LONGBLOB".to_string(),
+            },
             DataType::Blob => "LONGBLOB".to_string(),
 
             // JSON
@@ -388,17 +449,15 @@ mod tests {
         // Build a simple table AST
         let table = Table {
             name: "users".to_string(),
-            columns: vec![
-                Column {
-                    name: "id".to_string(),
-                    data_type: DataType::Integer(IntegerType::Int),
-                    nullable: false,
-                    default: None,
-                    auto_increment: false,
-                    on_update_timestamp: false,
-                    comment: None,
-                },
-            ],
+            columns: vec![Column {
+                name: "id".to_string(),
+                data_type: DataType::Integer(IntegerType::Int),
+                nullable: false,
+                default: None,
+                auto_increment: false,
+                on_update_timestamp: false,
+                comment: None,
+            }],
             constraints: vec![],
             comment: None,
         };
@@ -441,7 +500,9 @@ mod tests {
                 comment: None,
             };
 
-            let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
+            let sql = emitter
+                .emit_statement(&Statement::CreateTable(table))
+                .unwrap();
             assert!(sql.contains(expected), "Expected {} in: {}", expected, sql);
         }
     }
@@ -451,9 +512,20 @@ mod tests {
         let emitter = MySqlEmitter::new();
 
         let types = vec![
-            (DataType::String(StringType::Char { length: 10 }), "CHAR(10)"),
-            (DataType::String(StringType::Varchar { length: 255 }), "VARCHAR(255)"),
-            (DataType::String(StringType::Text { max_bytes: Some(65_535) }), "TEXT"),
+            (
+                DataType::String(StringType::Char { length: 10 }),
+                "CHAR(10)",
+            ),
+            (
+                DataType::String(StringType::Varchar { length: 255 }),
+                "VARCHAR(255)",
+            ),
+            (
+                DataType::String(StringType::Text {
+                    max_bytes: Some(65_535),
+                }),
+                "TEXT",
+            ),
         ];
 
         for (data_type, expected) in types {
@@ -472,7 +544,9 @@ mod tests {
                 comment: None,
             };
 
-            let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
+            let sql = emitter
+                .emit_statement(&Statement::CreateTable(table))
+                .unwrap();
             assert!(sql.contains(expected), "Expected {} in: {}", expected, sql);
         }
     }
@@ -483,7 +557,13 @@ mod tests {
 
         let types = vec![
             (DataType::Temporal(TemporalType::Date), "DATE"),
-            (DataType::Temporal(TemporalType::Timestamp { precision: None, with_timezone: false }), "DATETIME"),
+            (
+                DataType::Temporal(TemporalType::Timestamp {
+                    precision: None,
+                    with_timezone: false,
+                }),
+                "DATETIME",
+            ),
         ];
 
         for (data_type, expected) in types {
@@ -502,7 +582,9 @@ mod tests {
                 comment: None,
             };
 
-            let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
+            let sql = emitter
+                .emit_statement(&Statement::CreateTable(table))
+                .unwrap();
             assert!(sql.contains(expected), "Expected {} in: {}", expected, sql);
         }
     }
@@ -512,7 +594,13 @@ mod tests {
         let emitter = MySqlEmitter::new();
 
         let types = vec![
-            (DataType::Decimal { precision: 10, scale: 2 }, "DECIMAL(10,2)"),
+            (
+                DataType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                "DECIMAL(10,2)",
+            ),
             (DataType::Boolean, "TINYINT(1)"),
             (DataType::Float, "DOUBLE"),
             (DataType::Blob, "LONGBLOB"),
@@ -535,7 +623,9 @@ mod tests {
                 comment: None,
             };
 
-            let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
+            let sql = emitter
+                .emit_statement(&Statement::CreateTable(table))
+                .unwrap();
             assert!(sql.contains(expected), "Expected {} in: {}", expected, sql);
         }
     }
@@ -561,8 +651,14 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("DEFAULT NULL"), "Expected DEFAULT NULL in: {}", sql);
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
+        assert!(
+            sql.contains("DEFAULT NULL"),
+            "Expected DEFAULT NULL in: {}",
+            sql
+        );
     }
 
     #[test]
@@ -584,8 +680,14 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("DEFAULT 'pending'"), "Expected DEFAULT 'pending' in: {}", sql);
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
+        assert!(
+            sql.contains("DEFAULT 'pending'"),
+            "Expected DEFAULT 'pending' in: {}",
+            sql
+        );
     }
 
     #[test]
@@ -607,7 +709,9 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
         assert!(sql.contains("DEFAULT 0"), "Expected DEFAULT 0 in: {}", sql);
     }
 
@@ -619,7 +723,10 @@ mod tests {
             name: "t".to_string(),
             columns: vec![Column {
                 name: "created_at".to_string(),
-                data_type: DataType::Temporal(TemporalType::Timestamp { precision: None, with_timezone: false }),
+                data_type: DataType::Temporal(TemporalType::Timestamp {
+                    precision: None,
+                    with_timezone: false,
+                }),
                 nullable: true,
                 default: Some(DefaultValue::CurrentTimestamp),
                 auto_increment: false,
@@ -630,8 +737,14 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("DEFAULT CURRENT_TIMESTAMP"), "Expected DEFAULT CURRENT_TIMESTAMP in: {}", sql);
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
+        assert!(
+            sql.contains("DEFAULT CURRENT_TIMESTAMP"),
+            "Expected DEFAULT CURRENT_TIMESTAMP in: {}",
+            sql
+        );
     }
 
     // ========== ON UPDATE CURRENT_TIMESTAMP ==========
@@ -644,7 +757,10 @@ mod tests {
             name: "t".to_string(),
             columns: vec![Column {
                 name: "updated_at".to_string(),
-                data_type: DataType::Temporal(TemporalType::Timestamp { precision: None, with_timezone: false }),
+                data_type: DataType::Temporal(TemporalType::Timestamp {
+                    precision: None,
+                    with_timezone: false,
+                }),
                 nullable: false,
                 default: Some(DefaultValue::CurrentTimestamp),
                 auto_increment: false,
@@ -655,9 +771,19 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("DEFAULT CURRENT_TIMESTAMP"), "Expected DEFAULT CURRENT_TIMESTAMP in: {}", sql);
-        assert!(sql.contains("ON UPDATE CURRENT_TIMESTAMP"), "Expected ON UPDATE CURRENT_TIMESTAMP in: {}", sql);
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
+        assert!(
+            sql.contains("DEFAULT CURRENT_TIMESTAMP"),
+            "Expected DEFAULT CURRENT_TIMESTAMP in: {}",
+            sql
+        );
+        assert!(
+            sql.contains("ON UPDATE CURRENT_TIMESTAMP"),
+            "Expected ON UPDATE CURRENT_TIMESTAMP in: {}",
+            sql
+        );
     }
 
     // ========== AUTO_INCREMENT ==========
@@ -681,8 +807,14 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("AUTO_INCREMENT"), "Expected AUTO_INCREMENT in: {}", sql);
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
+        assert!(
+            sql.contains("AUTO_INCREMENT"),
+            "Expected AUTO_INCREMENT in: {}",
+            sql
+        );
     }
 
     // ========== Constraints ==========
@@ -709,8 +841,14 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("PRIMARY KEY"), "Expected PRIMARY KEY in: {}", sql);
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
+        assert!(
+            sql.contains("PRIMARY KEY"),
+            "Expected PRIMARY KEY in: {}",
+            sql
+        );
         assert!(sql.contains("(id)"), "Expected (id) in: {}", sql);
     }
 
@@ -736,7 +874,9 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
         assert!(sql.contains("UNIQUE"), "Expected UNIQUE in: {}", sql);
         assert!(sql.contains("email"), "Expected email in: {}", sql);
     }
@@ -778,11 +918,29 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("FOREIGN KEY"), "Expected FOREIGN KEY in: {}", sql);
-        assert!(sql.contains("REFERENCES users"), "Expected REFERENCES users in: {}", sql);
-        assert!(sql.contains("ON DELETE CASCADE"), "Expected ON DELETE CASCADE in: {}", sql);
-        assert!(sql.contains("ON UPDATE SET NULL"), "Expected ON UPDATE SET NULL in: {}", sql);
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
+        assert!(
+            sql.contains("FOREIGN KEY"),
+            "Expected FOREIGN KEY in: {}",
+            sql
+        );
+        assert!(
+            sql.contains("REFERENCES users"),
+            "Expected REFERENCES users in: {}",
+            sql
+        );
+        assert!(
+            sql.contains("ON DELETE CASCADE"),
+            "Expected ON DELETE CASCADE in: {}",
+            sql
+        );
+        assert!(
+            sql.contains("ON UPDATE SET NULL"),
+            "Expected ON UPDATE SET NULL in: {}",
+            sql
+        );
     }
 
     // ========== KEY (Index) ==========
@@ -813,8 +971,14 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("KEY org_id (org_id)"), "Expected KEY index in: {}", sql);
+        let sql = emitter
+            .emit_statement(&Statement::CreateTable(table))
+            .unwrap();
+        assert!(
+            sql.contains("KEY org_id (org_id)"),
+            "Expected KEY index in: {}",
+            sql
+        );
     }
 
     // ========== DROP TABLE ==========

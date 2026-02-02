@@ -3,12 +3,12 @@
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 
+use super::SqlParser;
 use crate::ast::{
-    Column, Constraint, DataType, DefaultValue, Dialect, IndexColumn, IntegerType,
-    LockMode, ReferentialAction, Statement, StringType, Table, TemporalType, Value,
+    Column, Constraint, DataType, DefaultValue, Dialect, IndexColumn, IntegerType, LockMode,
+    ReferentialAction, Statement, StringType, Table, TemporalType, Value,
 };
 use crate::error::ParseError;
-use super::SqlParser;
 
 /// Parser for MySQL SQL dialect
 pub struct MySqlParser;
@@ -52,36 +52,31 @@ impl SqlParser for MySqlParser {
 // Conversion helpers
 impl MySqlParser {
     /// Convert sqlparser's Statement to our neutral Statement
-    fn convert_statement(
-        &self,
-        stmt: sqlparser::ast::Statement,
-    ) -> Result<Statement, ParseError> {
+    fn convert_statement(&self, stmt: sqlparser::ast::Statement) -> Result<Statement, ParseError> {
         use sqlparser::ast::Statement as SpStatement;
 
         // Pre-compute raw SQL for passthrough statements (e.g., SET)
         let raw_sql = stmt.to_string();
 
         match stmt {
-            SpStatement::CreateTable(create) => {
-                self.convert_create_table(create)
-            }
+            SpStatement::CreateTable(create) => self.convert_create_table(create),
             SpStatement::Drop {
                 object_type,
                 if_exists,
                 names,
                 cascade,
                 ..
-            } => {
-                self.convert_drop(object_type, if_exists, names, cascade)
-            }
+            } => self.convert_drop(object_type, if_exists, names, cascade),
             SpStatement::CreateIndex(create_index) => {
                 let name = self.strip_backticks(
-                    &create_index.name
+                    &create_index
+                        .name
                         .map(|n| n.to_string())
-                        .unwrap_or_else(|| "unnamed_idx".to_string())
+                        .unwrap_or_else(|| "unnamed_idx".to_string()),
                 );
                 let table = self.strip_backticks(&create_index.table_name.to_string());
-                let columns: Vec<crate::ast::IndexColumn> = create_index.columns
+                let columns: Vec<crate::ast::IndexColumn> = create_index
+                    .columns
                     .iter()
                     .map(|c| crate::ast::IndexColumn {
                         name: self.strip_backticks(&c.expr.to_string()),
@@ -110,12 +105,8 @@ impl MySqlParser {
                     .collect();
                 Ok(Statement::LockTables { tables: converted })
             }
-            SpStatement::UnlockTables => {
-                Ok(Statement::UnlockTables)
-            }
-            SpStatement::Insert(insert) => {
-                self.convert_insert(insert)
-            }
+            SpStatement::UnlockTables => Ok(Statement::UnlockTables),
+            SpStatement::Insert(insert) => self.convert_insert(insert),
             SpStatement::Use(use_expr) => {
                 // Extract database name from any Use variant
                 let db_name = match &use_expr {
@@ -134,26 +125,17 @@ impl MySqlParser {
                 db_name,
                 if_not_exists,
                 ..
-            } => {
-                Ok(Statement::CreateDatabase {
-                    name: self.strip_backticks(&db_name.to_string()),
-                    if_not_exists,
-                })
-            }
+            } => Ok(Statement::CreateDatabase {
+                name: self.strip_backticks(&db_name.to_string()),
+                if_not_exists,
+            }),
             SpStatement::Commit { .. } => Ok(Statement::Commit),
-            SpStatement::AlterTable { name, operations, .. } => {
-                self.convert_alter_table(
-                    &self.strip_backticks(&name.to_string()),
-                    operations,
-                )
-            }
+            SpStatement::AlterTable {
+                name, operations, ..
+            } => self.convert_alter_table(&self.strip_backticks(&name.to_string()), operations),
             // DML pass-through: UPDATE, DELETE, etc.
-            SpStatement::Update { .. } => {
-                Ok(Statement::RawStatement { raw_sql })
-            }
-            SpStatement::Delete(_) => {
-                Ok(Statement::RawStatement { raw_sql })
-            }
+            SpStatement::Update { .. } => Ok(Statement::RawStatement { raw_sql }),
+            SpStatement::Delete(_) => Ok(Statement::RawStatement { raw_sql }),
             // Catch-all: SET statements pass through as raw SQL
             _ => {
                 let upper = raw_sql.to_uppercase();
@@ -233,10 +215,7 @@ impl MySqlParser {
     }
 
     /// Convert a column definition
-    fn convert_column(
-        &self,
-        col: sqlparser::ast::ColumnDef,
-    ) -> Result<Column, ParseError> {
+    fn convert_column(&self, col: sqlparser::ast::ColumnDef) -> Result<Column, ParseError> {
         use sqlparser::ast::ColumnOption;
 
         // 1. Get column name
@@ -290,10 +269,7 @@ impl MySqlParser {
     }
 
     /// Convert sqlparser data type to our DataType
-    fn convert_data_type(
-        &self,
-        dt: &sqlparser::ast::DataType,
-    ) -> Result<DataType, ParseError> {
+    fn convert_data_type(&self, dt: &sqlparser::ast::DataType) -> Result<DataType, ParseError> {
         use sqlparser::ast::DataType as SpDataType;
 
         match dt {
@@ -314,16 +290,16 @@ impl MySqlParser {
                 let length = self.extract_char_length(len).unwrap_or(255);
                 Ok(DataType::String(StringType::Varchar { length }))
             }
-            SpDataType::Text => Ok(DataType::String(StringType::Text { max_bytes: Some(65_535) })),
+            SpDataType::Text => Ok(DataType::String(StringType::Text {
+                max_bytes: Some(65_535),
+            })),
 
             // Temporal types
             SpDataType::Date => Ok(DataType::Temporal(TemporalType::Date)),
-            SpDataType::Datetime(precision) => {
-                Ok(DataType::Temporal(TemporalType::Timestamp {
-                    precision: precision.map(|p| p as u8),
-                    with_timezone: false,
-                }))
-            }
+            SpDataType::Datetime(precision) => Ok(DataType::Temporal(TemporalType::Timestamp {
+                precision: precision.map(|p| p as u8),
+                with_timezone: false,
+            })),
             SpDataType::Timestamp(precision, _tz) => {
                 Ok(DataType::Temporal(TemporalType::Timestamp {
                     precision: precision.map(|p| p as u8),
@@ -355,11 +331,9 @@ impl MySqlParser {
             SpDataType::JSON => Ok(DataType::Json),
 
             // ENUM
-            SpDataType::Enum(values) => {
-                Ok(DataType::Enum {
-                    values: values.clone(),
-                })
-            }
+            SpDataType::Enum(values) => Ok(DataType::Enum {
+                values: values.clone(),
+            }),
 
             // Binary types
             SpDataType::Varbinary(len) => {
@@ -375,40 +349,35 @@ impl MySqlParser {
             SpDataType::Custom(name, _) => {
                 let type_name = name.to_string().to_uppercase();
                 match type_name.as_str() {
-                    "TINYTEXT" => Ok(DataType::String(StringType::Text { max_bytes: Some(255) })),
-                    "MEDIUMTEXT" => Ok(DataType::String(StringType::Text { max_bytes: Some(16_777_215) })),
-                    "LONGTEXT" => Ok(DataType::String(StringType::Text { max_bytes: Some(4_294_967_295) })),
+                    "TINYTEXT" => Ok(DataType::String(StringType::Text {
+                        max_bytes: Some(255),
+                    })),
+                    "MEDIUMTEXT" => Ok(DataType::String(StringType::Text {
+                        max_bytes: Some(16_777_215),
+                    })),
+                    "LONGTEXT" => Ok(DataType::String(StringType::Text {
+                        max_bytes: Some(4_294_967_295),
+                    })),
                     "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => Ok(DataType::Blob),
-                    _ => Err(ParseError::new(format!(
-                        "Unsupported data type: {:?}",
-                        dt
-                    ))),
+                    _ => Err(ParseError::new(format!("Unsupported data type: {:?}", dt))),
                 }
             }
 
-            _ => Err(ParseError::new(format!(
-                "Unsupported data type: {:?}",
-                dt
-            ))),
+            _ => Err(ParseError::new(format!("Unsupported data type: {:?}", dt))),
         }
     }
 
     /// Extract length from CharacterLength
     /// e.g., VARCHAR(100) → returns Some(100)
     /// e.g., VARCHAR (no length) → returns None
-    fn extract_char_length(
-        &self,
-        len: &Option<sqlparser::ast::CharacterLength>,
-    ) -> Option<u32> {
+    fn extract_char_length(&self, len: &Option<sqlparser::ast::CharacterLength>) -> Option<u32> {
         use sqlparser::ast::CharacterLength;
 
         match len {
             None => None,
             Some(char_len) => {
                 match char_len {
-                    CharacterLength::IntegerLength { length, .. } => {
-                        Some(*length as u32)
-                    }
+                    CharacterLength::IntegerLength { length, .. } => Some(*length as u32),
                     CharacterLength::Max => {
                         // VARCHAR(MAX) - used in SQL Server
                         Some(u32::MAX)
@@ -436,10 +405,7 @@ impl MySqlParser {
     }
 
     /// Convert default value expression
-    fn convert_default(
-        &self,
-        expr: &sqlparser::ast::Expr,
-    ) -> Result<DefaultValue, ParseError> {
+    fn convert_default(&self, expr: &sqlparser::ast::Expr) -> Result<DefaultValue, ParseError> {
         use sqlparser::ast::Expr;
         use sqlparser::ast::Value;
 
@@ -464,12 +430,8 @@ impl MySqlParser {
             }
 
             // String: 'value'
-            Expr::Value(Value::SingleQuotedString(s)) => {
-                Ok(DefaultValue::String(s.clone()))
-            }
-            Expr::Value(Value::DoubleQuotedString(s)) => {
-                Ok(DefaultValue::String(s.clone()))
-            }
+            Expr::Value(Value::SingleQuotedString(s)) => Ok(DefaultValue::String(s.clone())),
+            Expr::Value(Value::DoubleQuotedString(s)) => Ok(DefaultValue::String(s.clone())),
 
             // Function call: NOW(), UUID(), etc.
             Expr::Function(f) => {
@@ -520,10 +482,8 @@ impl MySqlParser {
                     None => None,
                 };
 
-                let column_names: Vec<String> = columns
-                    .iter()
-                    .map(|col| col.value.clone())
-                    .collect();
+                let column_names: Vec<String> =
+                    columns.iter().map(|col| col.value.clone()).collect();
 
                 Ok(Some(Constraint::PrimaryKey {
                     name: constraint_name,
@@ -538,10 +498,8 @@ impl MySqlParser {
                     None => None,
                 };
 
-                let column_names: Vec<String> = columns
-                    .iter()
-                    .map(|col| col.value.clone())
-                    .collect();
+                let column_names: Vec<String> =
+                    columns.iter().map(|col| col.value.clone()).collect();
 
                 Ok(Some(Constraint::Unique {
                     name: constraint_name,
@@ -564,10 +522,8 @@ impl MySqlParser {
                     None => None,
                 };
 
-                let column_names: Vec<String> = columns
-                    .iter()
-                    .map(|col| col.value.clone())
-                    .collect();
+                let column_names: Vec<String> =
+                    columns.iter().map(|col| col.value.clone()).collect();
 
                 let ref_column_names: Vec<String> = referred_columns
                     .iter()
@@ -612,10 +568,7 @@ impl MySqlParser {
     }
 
     /// Convert INSERT statement
-    fn convert_insert(
-        &self,
-        insert: sqlparser::ast::Insert,
-    ) -> Result<Statement, ParseError> {
+    fn convert_insert(&self, insert: sqlparser::ast::Insert) -> Result<Statement, ParseError> {
         // 1. Table name
         let table = self.strip_backticks(&insert.table_name.to_string());
 
@@ -656,7 +609,12 @@ impl MySqlParser {
                     let column = self.convert_column(column_def)?;
                     converted_ops.push(crate::ast::AlterOperation::AddColumn(column));
                 }
-                SpAlterOp::ModifyColumn { col_name, data_type, options, .. } => {
+                SpAlterOp::ModifyColumn {
+                    col_name,
+                    data_type,
+                    options,
+                    ..
+                } => {
                     // Wrap into a ColumnDef so we can reuse convert_column
                     let column_options: Vec<sqlparser::ast::ColumnOptionDef> = options
                         .into_iter()
@@ -679,7 +637,10 @@ impl MySqlParser {
                         name: column_name.value,
                     });
                 }
-                SpAlterOp::RenameColumn { old_column_name, new_column_name } => {
+                SpAlterOp::RenameColumn {
+                    old_column_name,
+                    new_column_name,
+                } => {
                     converted_ops.push(crate::ast::AlterOperation::RenameColumn {
                         old_name: old_column_name.value,
                         new_name: new_column_name.value,
@@ -720,17 +681,12 @@ impl MySqlParser {
                 }
                 Ok(rows)
             }
-            _ => Err(ParseError::new(
-                "INSERT source is not a VALUES expression"
-            )),
+            _ => Err(ParseError::new("INSERT source is not a VALUES expression")),
         }
     }
 
     /// Convert an expression to our Value type (for INSERT values)
-    fn convert_value(
-        &self,
-        expr: &sqlparser::ast::Expr,
-    ) -> Result<Value, ParseError> {
+    fn convert_value(&self, expr: &sqlparser::ast::Expr) -> Result<Value, ParseError> {
         use sqlparser::ast::Expr;
         use sqlparser::ast::Value as SpValue;
 
@@ -747,12 +703,8 @@ impl MySqlParser {
                     Ok(Value::Expression(n.clone()))
                 }
             }
-            Expr::Value(SpValue::SingleQuotedString(s)) => {
-                Ok(Value::String(s.clone()))
-            }
-            Expr::Value(SpValue::DoubleQuotedString(s)) => {
-                Ok(Value::String(s.clone()))
-            }
+            Expr::Value(SpValue::SingleQuotedString(s)) => Ok(Value::String(s.clone())),
+            Expr::Value(SpValue::DoubleQuotedString(s)) => Ok(Value::String(s.clone())),
             // Function calls like NOW(), UUID()
             Expr::Function(f) => {
                 let name = f.name.to_string().to_uppercase();
@@ -773,8 +725,7 @@ impl MySqlParser {
         sql.lines()
             .filter(|line| {
                 let trimmed = line.trim().to_uppercase();
-                !trimmed.starts_with("CREATE USER")
-                    && !trimmed.starts_with("GRANT ")
+                !trimmed.starts_with("CREATE USER") && !trimmed.starts_with("GRANT ")
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -894,7 +845,10 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::Integer(IntegerType::TinyInt)),
+            matches!(
+                table.columns[0].data_type,
+                DataType::Integer(IntegerType::TinyInt)
+            ),
             "Expected TINYINT, got {:?}",
             table.columns[0].data_type
         );
@@ -912,7 +866,10 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::Integer(IntegerType::SmallInt)),
+            matches!(
+                table.columns[0].data_type,
+                DataType::Integer(IntegerType::SmallInt)
+            ),
             "Expected SMALLINT, got {:?}",
             table.columns[0].data_type
         );
@@ -930,7 +887,10 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::Integer(IntegerType::BigInt)),
+            matches!(
+                table.columns[0].data_type,
+                DataType::Integer(IntegerType::BigInt)
+            ),
             "Expected BIGINT, got {:?}",
             table.columns[0].data_type
         );
@@ -969,7 +929,10 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::String(StringType::Text { .. })),
+            matches!(
+                table.columns[0].data_type,
+                DataType::String(StringType::Text { .. })
+            ),
             "Expected TEXT, got {:?}",
             table.columns[0].data_type
         );
@@ -989,7 +952,10 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::Temporal(TemporalType::Date)),
+            matches!(
+                table.columns[0].data_type,
+                DataType::Temporal(TemporalType::Date)
+            ),
             "Expected DATE, got {:?}",
             table.columns[0].data_type
         );
@@ -1007,7 +973,10 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::Temporal(TemporalType::Timestamp { .. })),
+            matches!(
+                table.columns[0].data_type,
+                DataType::Temporal(TemporalType::Timestamp { .. })
+            ),
             "Expected DATETIME/Timestamp, got {:?}",
             table.columns[0].data_type
         );
@@ -1025,7 +994,10 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::Temporal(TemporalType::Timestamp { .. })),
+            matches!(
+                table.columns[0].data_type,
+                DataType::Temporal(TemporalType::Timestamp { .. })
+            ),
             "Expected TIMESTAMP, got {:?}",
             table.columns[0].data_type
         );
@@ -1241,7 +1213,10 @@ mod tests {
             _ => panic!("Expected CreateTable"),
         };
 
-        assert_eq!(table.columns[0].default, Some(DefaultValue::CurrentTimestamp));
+        assert_eq!(
+            table.columns[0].default,
+            Some(DefaultValue::CurrentTimestamp)
+        );
     }
 
     // ========== ON UPDATE CURRENT_TIMESTAMP ==========
@@ -1339,18 +1314,19 @@ mod tests {
             _ => panic!("Expected CreateTable"),
         };
 
-        let has_index = table.constraints.iter().any(|c| {
-            match c {
-                Constraint::Index { name, columns, unique } => {
-                    name == "org_id"
-                        && columns.len() == 1
-                        && columns[0].name == "org_id"
-                        && !unique
-                }
-                _ => false,
-            }
+        let has_index = table.constraints.iter().any(|c| match c {
+            Constraint::Index {
+                name,
+                columns,
+                unique,
+            } => name == "org_id" && columns.len() == 1 && columns[0].name == "org_id" && !unique,
+            _ => false,
         });
-        assert!(has_index, "Expected KEY index constraint, got: {:?}", table.constraints);
+        assert!(
+            has_index,
+            "Expected KEY index constraint, got: {:?}",
+            table.constraints
+        );
     }
 
     #[test]
@@ -1368,15 +1344,18 @@ mod tests {
             _ => panic!("Expected CreateTable"),
         };
 
-        let has_fk = table.constraints.iter().any(|c| {
-            match c {
-                Constraint::ForeignKey { columns, ref_table, ref_columns, .. } => {
-                    columns == &vec!["user_id".to_string()]
-                        && ref_table == "users"
-                        && ref_columns == &vec!["id".to_string()]
-                }
-                _ => false,
+        let has_fk = table.constraints.iter().any(|c| match c {
+            Constraint::ForeignKey {
+                columns,
+                ref_table,
+                ref_columns,
+                ..
+            } => {
+                columns == &vec!["user_id".to_string()]
+                    && ref_table == "users"
+                    && ref_columns == &vec!["id".to_string()]
             }
+            _ => false,
         });
         assert!(has_fk, "Expected FOREIGN KEY constraint");
     }
@@ -1396,11 +1375,13 @@ mod tests {
             _ => panic!("Expected CreateTable"),
         };
 
-        let fk = table.constraints.iter().find_map(|c| {
-            match c {
-                Constraint::ForeignKey { on_delete, on_update, .. } => Some((on_delete, on_update)),
-                _ => None,
-            }
+        let fk = table.constraints.iter().find_map(|c| match c {
+            Constraint::ForeignKey {
+                on_delete,
+                on_update,
+                ..
+            } => Some((on_delete, on_update)),
+            _ => None,
         });
 
         assert!(fk.is_some(), "Expected FOREIGN KEY constraint");
@@ -1441,7 +1422,10 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::Integer(IntegerType::TinyInt)),
+            matches!(
+                table.columns[0].data_type,
+                DataType::Integer(IntegerType::TinyInt)
+            ),
             "TINYINT (no width) should stay as TinyInt, got {:?}",
             table.columns[0].data_type
         );
@@ -1460,8 +1444,14 @@ mod tests {
             _ => panic!("Expected CreateTable"),
         };
 
-        assert_eq!(table.name, "users", "Backticks should be stripped from table name");
-        assert_eq!(table.columns[0].name, "id", "Backticks should be stripped from column name");
+        assert_eq!(
+            table.name, "users",
+            "Backticks should be stripped from table name"
+        );
+        assert_eq!(
+            table.columns[0].name, "id",
+            "Backticks should be stripped from column name"
+        );
     }
 
     #[test]
@@ -1479,14 +1469,16 @@ mod tests {
             _ => panic!("Expected CreateTable"),
         };
 
-        let fk = table.constraints.iter().find_map(|c| {
-            match c {
-                Constraint::ForeignKey { ref_table, .. } => Some(ref_table.clone()),
-                _ => None,
-            }
+        let fk = table.constraints.iter().find_map(|c| match c {
+            Constraint::ForeignKey { ref_table, .. } => Some(ref_table.clone()),
+            _ => None,
         });
 
-        assert_eq!(fk, Some("users".to_string()), "Backticks should be stripped from FK ref table");
+        assert_eq!(
+            fk,
+            Some("users".to_string()),
+            "Backticks should be stripped from FK ref table"
+        );
     }
 
     // ========== DROP TABLE ==========
@@ -1499,7 +1491,11 @@ mod tests {
         let result = parser.parse(sql).unwrap();
 
         match &result[0] {
-            Statement::DropTable { name, if_exists, cascade } => {
+            Statement::DropTable {
+                name,
+                if_exists,
+                cascade,
+            } => {
                 assert_eq!(name, "users");
                 assert_eq!(*if_exists, false);
                 assert_eq!(*cascade, false);
@@ -1553,7 +1549,11 @@ mod tests {
         let result = parser.parse(sql).unwrap();
 
         match &result[0] {
-            Statement::Insert { table, columns, values } => {
+            Statement::Insert {
+                table,
+                columns,
+                values,
+            } => {
                 assert_eq!(table, "t");
                 assert!(columns.is_none(), "No column list in this INSERT");
                 assert_eq!(values.len(), 1, "One row of values");
@@ -1606,7 +1606,10 @@ mod tests {
         let result = parser.parse(sql).unwrap();
 
         match &result[0] {
-            Statement::CreateDatabase { name, if_not_exists } => {
+            Statement::CreateDatabase {
+                name,
+                if_not_exists,
+            } => {
                 assert_eq!(name, "account");
                 assert_eq!(*if_not_exists, true);
             }
@@ -1622,7 +1625,10 @@ mod tests {
         let result = parser.parse(sql).unwrap();
 
         match &result[0] {
-            Statement::CreateDatabase { name, if_not_exists } => {
+            Statement::CreateDatabase {
+                name,
+                if_not_exists,
+            } => {
                 assert_eq!(name, "mydb");
                 assert_eq!(*if_not_exists, false);
             }
@@ -1638,7 +1644,9 @@ mod tests {
         let result = parser.parse(sql).unwrap();
 
         match &result[0] {
-            Statement::DropTable { name, if_exists, .. } => {
+            Statement::DropTable {
+                name, if_exists, ..
+            } => {
                 assert_eq!(name, "users");
                 assert_eq!(*if_exists, true);
             }

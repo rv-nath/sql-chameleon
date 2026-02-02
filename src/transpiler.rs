@@ -3,12 +3,13 @@
 use std::collections::HashMap;
 
 use crate::ast::Dialect;
-use crate::error::TranspileError;
-use crate::parser::SqlParser;
-use crate::parser::mysql::MySqlParser;
 use crate::emitter::SqlEmitter;
 use crate::emitter::mysql::MySqlEmitter;
 use crate::emitter::oracle::OracleEmitter;
+use crate::error::TranspileError;
+use crate::parser::SqlParser;
+use crate::parser::mysql::MySqlParser;
+use crate::parser::oracle::OracleParser;
 
 pub struct SqlTranspiler {
     parsers: HashMap<Dialect, Box<dyn SqlParser>>,
@@ -24,19 +25,15 @@ impl SqlTranspiler {
         parsers.insert(Dialect::MySQL, Box::new(MySqlParser::new()));
         emitters.insert(Dialect::MySQL, Box::new(MySqlEmitter::new()));
 
-        // Register Oracle (emitter only for now)
+        // Register Oracle
+        parsers.insert(Dialect::Oracle, Box::new(OracleParser::new()));
         emitters.insert(Dialect::Oracle, Box::new(OracleEmitter::new()));
 
         Self { parsers, emitters }
     }
 
     /// Convert SQL from one dialect to another
-    pub fn convert(
-        &self,
-        sql: &str,
-        from: Dialect,
-        to: Dialect,
-    ) -> Result<String, TranspileError> {
+    pub fn convert(&self, sql: &str, from: Dialect, to: Dialect) -> Result<String, TranspileError> {
         // 1. Find the right parser
         let parser = self
             .parsers
@@ -69,7 +66,9 @@ mod tests {
 
         let input = "CREATE TABLE users (id INT NOT NULL, name VARCHAR(100));";
 
-        let output = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+        let output = transpiler
+            .convert(input, Dialect::MySQL, Dialect::MySQL)
+            .unwrap();
 
         assert!(output.contains("CREATE TABLE"), "Should have CREATE TABLE");
         assert!(output.contains("users"), "Should have table name");
@@ -93,16 +92,33 @@ mod tests {
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );";
 
-        let output = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+        let output = transpiler
+            .convert(input, Dialect::MySQL, Dialect::MySQL)
+            .unwrap();
 
         assert!(output.contains("BIGINT"), "Should have BIGINT");
-        assert!(output.contains("AUTO_INCREMENT"), "Should have AUTO_INCREMENT");
-        assert!(output.contains("DECIMAL(10,2)"), "Should have DECIMAL(10,2)");
-        assert!(output.contains("DEFAULT CURRENT_TIMESTAMP"), "Should have DEFAULT CURRENT_TIMESTAMP");
+        assert!(
+            output.contains("AUTO_INCREMENT"),
+            "Should have AUTO_INCREMENT"
+        );
+        assert!(
+            output.contains("DECIMAL(10,2)"),
+            "Should have DECIMAL(10,2)"
+        );
+        assert!(
+            output.contains("DEFAULT CURRENT_TIMESTAMP"),
+            "Should have DEFAULT CURRENT_TIMESTAMP"
+        );
         assert!(output.contains("PRIMARY KEY"), "Should have PRIMARY KEY");
         assert!(output.contains("FOREIGN KEY"), "Should have FOREIGN KEY");
-        assert!(output.contains("REFERENCES users"), "Should have REFERENCES");
-        assert!(output.contains("ON DELETE CASCADE"), "Should have ON DELETE CASCADE");
+        assert!(
+            output.contains("REFERENCES users"),
+            "Should have REFERENCES"
+        );
+        assert!(
+            output.contains("ON DELETE CASCADE"),
+            "Should have ON DELETE CASCADE"
+        );
     }
 
     #[test]
@@ -117,20 +133,46 @@ mod tests {
             PRIMARY KEY (id)
         );";
 
-        let output = transpiler.convert(input, Dialect::MySQL, Dialect::Oracle).unwrap();
+        let output = transpiler
+            .convert(input, Dialect::MySQL, Dialect::Oracle)
+            .unwrap();
 
         // INT types should become NUMBER
-        assert!(output.contains("NUMBER(19)"), "BIGINT should map to NUMBER(19), got: {}", output);
+        assert!(
+            output.contains("NUMBER(19)"),
+            "BIGINT should map to NUMBER(19), got: {}",
+            output
+        );
         // VARCHAR should become VARCHAR2
-        assert!(output.contains("VARCHAR2(100 CHAR)"), "VARCHAR should map to VARCHAR2, got: {}", output);
+        assert!(
+            output.contains("VARCHAR2(100 CHAR)"),
+            "VARCHAR should map to VARCHAR2, got: {}",
+            output
+        );
         // BOOLEAN should become NUMBER(1)
-        assert!(output.contains("NUMBER(1)"), "BOOLEAN should map to NUMBER(1), got: {}", output);
+        assert!(
+            output.contains("NUMBER(1)"),
+            "BOOLEAN should map to NUMBER(1), got: {}",
+            output
+        );
         // FALSE should become 0
-        assert!(output.contains("DEFAULT 0"), "FALSE should map to 0, got: {}", output);
+        assert!(
+            output.contains("DEFAULT 0"),
+            "FALSE should map to 0, got: {}",
+            output
+        );
         // CURRENT_TIMESTAMP should become SYSTIMESTAMP
-        assert!(output.contains("SYSTIMESTAMP"), "Should use SYSTIMESTAMP, got: {}", output);
+        assert!(
+            output.contains("SYSTIMESTAMP"),
+            "Should use SYSTIMESTAMP, got: {}",
+            output
+        );
         // DATETIME should become TIMESTAMP
-        assert!(output.contains("TIMESTAMP"), "DATETIME should map to TIMESTAMP, got: {}", output);
+        assert!(
+            output.contains("TIMESTAMP"),
+            "DATETIME should map to TIMESTAMP, got: {}",
+            output
+        );
     }
 
     #[test]
@@ -138,8 +180,76 @@ mod tests {
         let transpiler = SqlTranspiler::new();
 
         let input = "CREATE TABLE t (id INT);";
-        let result = transpiler.convert(input, Dialect::Oracle, Dialect::MySQL);
+        let result = transpiler.convert(input, Dialect::PostgreSQL, Dialect::MySQL);
 
         assert!(result.is_err(), "Should fail for unsupported dialect");
+    }
+
+    #[test]
+    fn test_oracle_roundtrip_simple() {
+        let transpiler = SqlTranspiler::new();
+
+        let input = "CREATE TABLE users (id NUMBER(10) NOT NULL, name VARCHAR2(100));";
+
+        let output = transpiler
+            .convert(input, Dialect::Oracle, Dialect::Oracle)
+            .unwrap();
+
+        assert!(output.contains("CREATE TABLE"), "Should have CREATE TABLE");
+        assert!(output.contains("users"), "Should have table name");
+        assert!(output.contains("NUMBER(10)"), "Should have NUMBER(10)");
+        assert!(
+            output.contains("VARCHAR2(100 CHAR)"),
+            "Should have VARCHAR2(100 CHAR)"
+        );
+        assert!(output.contains("NOT NULL"), "Should have NOT NULL");
+    }
+
+    #[test]
+    fn test_oracle_to_mysql() {
+        let transpiler = SqlTranspiler::new();
+
+        let input = "CREATE TABLE users (
+            id NUMBER(19) NOT NULL,
+            name VARCHAR2(100) NOT NULL,
+            active NUMBER(1) DEFAULT 0,
+            created_at TIMESTAMP DEFAULT SYSTIMESTAMP,
+            PRIMARY KEY (id)
+        );";
+
+        let output = transpiler
+            .convert(input, Dialect::Oracle, Dialect::MySQL)
+            .unwrap();
+
+        // NUMBER(19) → BIGINT
+        assert!(
+            output.contains("BIGINT"),
+            "NUMBER(19) should map to BIGINT, got: {}",
+            output
+        );
+        // VARCHAR2 → VARCHAR
+        assert!(
+            output.contains("VARCHAR(100)"),
+            "VARCHAR2 should map to VARCHAR, got: {}",
+            output
+        );
+        // NUMBER(1) → TINYINT(1)
+        assert!(
+            output.contains("TINYINT(1)"),
+            "NUMBER(1) should map to TINYINT(1), got: {}",
+            output
+        );
+        // SYSTIMESTAMP → CURRENT_TIMESTAMP
+        assert!(
+            output.contains("CURRENT_TIMESTAMP"),
+            "Should use CURRENT_TIMESTAMP, got: {}",
+            output
+        );
+        // TIMESTAMP → DATETIME
+        assert!(
+            output.contains("DATETIME"),
+            "TIMESTAMP should map to DATETIME, got: {}",
+            output
+        );
     }
 }

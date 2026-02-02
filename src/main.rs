@@ -34,7 +34,10 @@ fn parse_dialect(name: &str) -> Result<Dialect, String> {
         "postgresql" | "postgres" | "pg" => Ok(Dialect::PostgreSQL),
         "sqlite" => Ok(Dialect::SQLite),
         "sqlserver" | "mssql" => Ok(Dialect::SQLServer),
-        _ => Err(format!("Unknown dialect: '{}'. Supported: mysql, oracle, postgresql, sqlite, sqlserver", name)),
+        _ => Err(format!(
+            "Unknown dialect: '{}'. Supported: mysql, oracle, postgresql, sqlite, sqlserver",
+            name
+        )),
     }
 }
 
@@ -79,17 +82,18 @@ fn main() {
 
     // Write output
     match cli.output {
-        Some(path) => {
-            match fs::write(&path, &output) {
-                Ok(_) => {
-                    println!("Converted {} → {} written to '{}'", from_dialect, to_dialect, path);
-                }
-                Err(e) => {
-                    eprintln!("Error writing '{}': {}", path, e);
-                    process::exit(1);
-                }
+        Some(path) => match fs::write(&path, &output) {
+            Ok(_) => {
+                println!(
+                    "Converted {} → {} written to '{}'",
+                    from_dialect, to_dialect, path
+                );
             }
-        }
+            Err(e) => {
+                eprintln!("Error writing '{}': {}", path, e);
+                process::exit(1);
+            }
+        },
         None => {
             println!("{}", output);
         }
