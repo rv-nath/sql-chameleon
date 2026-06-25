@@ -1,7 +1,7 @@
 // Error types
 
-use crate::ast::Dialect;
 use std::fmt;
+use crate::ast::Dialect;
 
 /// Errors that can occur during parsing
 #[derive(Debug, Clone)]

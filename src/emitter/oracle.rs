@@ -1,11 +1,11 @@
 // Oracle Emitter
 
-use super::SqlEmitter;
 use crate::ast::{
-    Column, Constraint, DataType, DefaultValue, Dialect, IntegerType, ReferentialAction, Statement,
-    StringType, Table, TemporalType,
+    Column, Constraint, DataType, DefaultValue, Dialect, IntegerType, ReferentialAction,
+    Statement, StringType, Table, TemporalType,
 };
 use crate::error::EmitError;
+use super::SqlEmitter;
 
 /// Emitter for Oracle SQL dialect
 pub struct OracleEmitter;
@@ -26,7 +26,7 @@ impl SqlEmitter for OracleEmitter {
             "-- Oracle session settings\n\
              ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS';\n\
              ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD';\n\
-             SET DEFINE OFF;\n",
+             SET DEFINE OFF;\n"
         );
 
         let results: Result<Vec<String>, EmitError> = statements
@@ -42,43 +42,35 @@ impl SqlEmitter for OracleEmitter {
     fn emit_statement(&self, stmt: &Statement) -> Result<String, EmitError> {
         match stmt {
             Statement::CreateTable(table) => self.emit_create_table(table),
-            Statement::DropTable {
-                name,
-                if_exists,
-                cascade,
-            } => self.emit_drop_table(name, *if_exists, *cascade),
-            Statement::CreateIndex {
-                name,
-                table,
-                columns,
-                unique,
-            } => {
+            Statement::DropTable { name, if_exists, cascade } => {
+                self.emit_drop_table(name, *if_exists, *cascade)
+            }
+            Statement::CreateIndex { name, table, columns, unique, if_not_exists: _ } => {
+                // Oracle has no `CREATE INDEX IF NOT EXISTS`. Idempotency
+                // for Oracle index creation typically goes through a
+                // PL/SQL block or `BEGIN ... EXCEPTION WHEN OTHERS ...`
+                // wrapper, neither of which we synthesize yet. Drop the
+                // flag for now; revisit if we wire Oracle into the deploy.
                 let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
                 let unique_str = if *unique { "UNIQUE " } else { "" };
-                Ok(format!(
-                    "CREATE {}INDEX {} ON {} ({});",
-                    unique_str,
-                    name,
-                    table,
-                    cols.join(", ")
-                ))
+                Ok(format!("CREATE {}INDEX {} ON {} ({});", unique_str, name, table, cols.join(", ")))
             }
             Statement::LockTables { tables } => {
                 // Oracle uses different locking syntax; emit as comment
                 let names: Vec<String> = tables.iter().map(|(n, _)| n.clone()).collect();
-                Ok(format!(
-                    "-- LOCK TABLES {} (not applicable in Oracle)",
-                    names.join(", ")
-                ))
+                Ok(format!("-- LOCK TABLES {} (not applicable in Oracle)", names.join(", ")))
             }
             Statement::UnlockTables => {
                 Ok("-- UNLOCK TABLES (not applicable in Oracle)".to_string())
             }
-            Statement::Insert {
-                table,
-                columns,
-                values,
-            } => self.emit_insert(table, columns, values),
+            Statement::Insert { table, columns, values, ignore: _ } => {
+                // Oracle has no INSERT IGNORE; the closest equivalent is
+                // INSERT ... WHEN NOT EXISTS or a MERGE statement, neither
+                // of which we synthesize today. Silently drop the IGNORE
+                // flag here — Oracle deploys to a fresh DB so duplicates
+                // shouldn't arise. Revisit if seed-data ever lands twice.
+                self.emit_insert(table, columns, values)
+            }
             Statement::Use { database } => {
                 Ok(format!("ALTER SESSION SET CURRENT_SCHEMA = {};", database))
             }
@@ -95,73 +87,8 @@ impl SqlEmitter for OracleEmitter {
             Statement::SetVariable { raw_sql } => {
                 Ok(format!("-- {} (MySQL session variable, skipped)", raw_sql))
             }
-            Statement::AlterTable { name, operations } => self.emit_alter_table(name, operations),
-            Statement::CreateSequence {
-                name,
-                start_with,
-                increment_by,
-                min_value,
-                max_value,
-                cache,
-                no_cache,
-                cycle,
-            } => {
-                let mut parts = vec![format!("CREATE SEQUENCE {}", name)];
-                if let Some(v) = start_with {
-                    parts.push(format!("START WITH {}", v));
-                }
-                if let Some(v) = increment_by {
-                    parts.push(format!("INCREMENT BY {}", v));
-                }
-                if let Some(v) = min_value {
-                    parts.push(format!("MINVALUE {}", v));
-                }
-                if let Some(v) = max_value {
-                    parts.push(format!("MAXVALUE {}", v));
-                }
-                if *no_cache {
-                    parts.push("NOCACHE".to_string());
-                } else if let Some(v) = cache {
-                    parts.push(format!("CACHE {}", v));
-                }
-                if *cycle {
-                    parts.push("CYCLE".to_string());
-                }
-                Ok(format!("{};", parts.join(" ")))
-            }
-            Statement::CreateTrigger { body, .. } => {
-                // Emit raw PL/SQL trigger body with / terminator
-                Ok(format!("{}\n/", body.trim_end()))
-            }
-            Statement::CreateSynonym {
-                name,
-                target,
-                is_public,
-            } => {
-                let public_str = if *is_public { "PUBLIC " } else { "" };
-                Ok(format!(
-                    "CREATE {}SYNONYM {} FOR {};",
-                    public_str, name, target
-                ))
-            }
-            Statement::Grant { raw_sql } | Statement::Revoke { raw_sql } => {
-                Ok(format!("{};", raw_sql))
-            }
-            Statement::CreateView {
-                name,
-                or_replace,
-                columns,
-                query,
-            } => {
-                let replace_str = if *or_replace { "OR REPLACE " } else { "" };
-                let col_str = match columns {
-                    Some(cols) => format!(" ({})", cols.join(", ")),
-                    None => String::new(),
-                };
-                Ok(format!(
-                    "CREATE {}VIEW {}{} AS\n{};",
-                    replace_str, name, col_str, query
-                ))
+            Statement::AlterTable { name, operations } => {
+                self.emit_alter_table(name, operations)
             }
             Statement::RawStatement { raw_sql } => Ok(format!("{};", raw_sql)),
         }
@@ -221,12 +148,7 @@ END;
         // Append CREATE INDEX for Index constraints
         // Oracle doesn't support inline KEY/INDEX in CREATE TABLE
         for constraint in &table.constraints {
-            if let Constraint::Index {
-                name,
-                columns,
-                unique,
-            } = constraint
-            {
+            if let Constraint::Index { name, columns, unique } = constraint {
                 let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
                 let unique_str = if *unique { "UNIQUE " } else { "" };
                 // Prefix index name with table name to avoid duplicates across tables
@@ -255,27 +177,16 @@ END;
             .iter()
             .map(|op| match op {
                 crate::ast::AlterOperation::AddColumn(col) => {
-                    format!(
-                        "ALTER TABLE {} ADD ({});",
-                        table,
-                        self.emit_column(col).trim()
-                    )
+                    format!("ALTER TABLE {} ADD ({});", table, self.emit_column(col).trim())
                 }
                 crate::ast::AlterOperation::ModifyColumn(col) => {
-                    format!(
-                        "ALTER TABLE {} MODIFY ({});",
-                        table,
-                        self.emit_column(col).trim()
-                    )
+                    format!("ALTER TABLE {} MODIFY ({});", table, self.emit_column(col).trim())
                 }
                 crate::ast::AlterOperation::DropColumn { name } => {
                     format!("ALTER TABLE {} DROP COLUMN {};", table, name)
                 }
                 crate::ast::AlterOperation::RenameColumn { old_name, new_name } => {
-                    format!(
-                        "ALTER TABLE {} RENAME COLUMN {} TO {};",
-                        table, old_name, new_name
-                    )
+                    format!("ALTER TABLE {} RENAME COLUMN {} TO {};", table, old_name, new_name)
                 }
                 crate::ast::AlterOperation::AddConstraint(constraint) => {
                     match self.emit_constraint(constraint) {
@@ -333,14 +244,20 @@ END;
 
             // Temporal
             DataType::Temporal(TemporalType::Date) => "DATE".to_string(),
-            DataType::Temporal(TemporalType::Time { precision }) => match precision {
-                Some(p) => format!("TIMESTAMP({})", p),
-                None => "TIMESTAMP".to_string(),
-            },
-            DataType::Temporal(TemporalType::Timestamp {
-                precision,
-                with_timezone,
-            }) => {
+            DataType::Temporal(TemporalType::Time { precision }) => {
+                match precision {
+                    Some(p) => format!("TIMESTAMP({})", p),
+                    None => "TIMESTAMP".to_string(),
+                }
+            }
+            DataType::Temporal(TemporalType::Datetime { precision }) => {
+                // Oracle has no DATETIME — closest is TIMESTAMP without timezone.
+                match precision {
+                    Some(p) => format!("TIMESTAMP({})", p),
+                    None => "TIMESTAMP".to_string(),
+                }
+            }
+            DataType::Temporal(TemporalType::Timestamp { precision, with_timezone }) => {
                 let base = match precision {
                     Some(p) => format!("TIMESTAMP({})", p),
                     None => "TIMESTAMP".to_string(),
@@ -364,10 +281,12 @@ END;
             DataType::Float => "NUMBER".to_string(),
 
             // Binary
-            DataType::Binary { length } => match length {
-                Some(l) => format!("RAW({})", l),
-                None => "BLOB".to_string(),
-            },
+            DataType::Binary { length } => {
+                match length {
+                    Some(l) => format!("RAW({})", l),
+                    None => "BLOB".to_string(),
+                }
+            }
             DataType::Blob => "BLOB".to_string(),
 
             // JSON → CLOB (Oracle doesn't have native JSON type until 21c)
@@ -401,12 +320,7 @@ END;
     }
 
     /// Emit DROP TABLE
-    fn emit_drop_table(
-        &self,
-        name: &str,
-        if_exists: bool,
-        cascade: bool,
-    ) -> Result<String, EmitError> {
+    fn emit_drop_table(&self, name: &str, if_exists: bool, cascade: bool) -> Result<String, EmitError> {
         let cascade_str = if cascade { " CASCADE CONSTRAINTS" } else { "" };
 
         // Oracle doesn't support IF EXISTS - needs PL/SQL block
@@ -494,12 +408,7 @@ END;
             .iter()
             .map(|row| {
                 let vals: Vec<String> = row.iter().map(|v| self.emit_insert_value(v)).collect();
-                format!(
-                    "INSERT INTO {}{} VALUES ({});",
-                    table,
-                    col_part,
-                    vals.join(",")
-                )
+                format!("INSERT INTO {}{} VALUES ({});", table, col_part, vals.join(","))
             })
             .collect();
 
@@ -568,17 +477,12 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter
-            .emit_statement(&Statement::CreateTable(table))
-            .unwrap();
+        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
 
         assert!(sql.contains("CREATE TABLE"), "Should have CREATE TABLE");
         assert!(sql.contains("users"), "Should have table name");
         assert!(sql.contains("NUMBER(10)"), "INT should map to NUMBER(10)");
-        assert!(
-            sql.contains("VARCHAR2(100 CHAR)"),
-            "VARCHAR should map to VARCHAR2(n CHAR)"
-        );
+        assert!(sql.contains("VARCHAR2(100 CHAR)"), "VARCHAR should map to VARCHAR2(n CHAR)");
         assert!(sql.contains("NOT NULL"), "Should have NOT NULL");
     }
 
@@ -589,22 +493,13 @@ mod tests {
         let types = vec![
             (DataType::Integer(IntegerType::TinyInt), "NUMBER(3)"),
             (DataType::Integer(IntegerType::BigInt), "NUMBER(19)"),
-            (
-                DataType::String(StringType::Text { max_bytes: None }),
-                "CLOB",
-            ),
+            (DataType::String(StringType::Text { max_bytes: None }), "CLOB"),
             (DataType::Boolean, "NUMBER(1)"),
             (DataType::Float, "NUMBER"),
             (DataType::Blob, "BLOB"),
             (DataType::Json, "CLOB"),
             (DataType::Uuid, "RAW(16)"),
-            (
-                DataType::Decimal {
-                    precision: 10,
-                    scale: 2,
-                },
-                "NUMBER(10,2)",
-            ),
+            (DataType::Decimal { precision: 10, scale: 2 }, "NUMBER(10,2)"),
         ];
 
         for (data_type, expected) in types {
@@ -623,9 +518,7 @@ mod tests {
                 comment: None,
             };
 
-            let sql = emitter
-                .emit_statement(&Statement::CreateTable(table))
-                .unwrap();
+            let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
             assert!(sql.contains(expected), "Expected {} in: {}", expected, sql);
         }
     }
@@ -639,10 +532,7 @@ mod tests {
             name: "t".to_string(),
             columns: vec![Column {
                 name: "created_at".to_string(),
-                data_type: DataType::Temporal(TemporalType::Timestamp {
-                    precision: None,
-                    with_timezone: false,
-                }),
+                data_type: DataType::Temporal(TemporalType::Timestamp { precision: None, with_timezone: false }),
                 nullable: true,
                 default: Some(DefaultValue::CurrentTimestamp),
                 auto_increment: false,
@@ -653,14 +543,8 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter
-            .emit_statement(&Statement::CreateTable(table))
-            .unwrap();
-        assert!(
-            sql.contains("DEFAULT SYSTIMESTAMP"),
-            "Expected SYSTIMESTAMP in: {}",
-            sql
-        );
+        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
+        assert!(sql.contains("DEFAULT SYSTIMESTAMP"), "Expected SYSTIMESTAMP in: {}", sql);
     }
 
     #[test]
@@ -683,13 +567,8 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter
-            .emit_statement(&Statement::CreateTable(table))
-            .unwrap();
-        assert!(
-            sql.contains("NUMBER(1)"),
-            "Should use NUMBER(1) for boolean"
-        );
+        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
+        assert!(sql.contains("NUMBER(1)"), "Should use NUMBER(1) for boolean");
         assert!(sql.contains("DEFAULT 0"), "Should use 0 for false");
     }
 
@@ -715,29 +594,15 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter
-            .emit_statement(&Statement::CreateTable(table))
-            .unwrap();
+        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
 
         // Should have CREATE SEQUENCE
-        assert!(
-            sql.contains("CREATE SEQUENCE"),
-            "Expected CREATE SEQUENCE in:\n{}",
-            sql
-        );
+        assert!(sql.contains("CREATE SEQUENCE"), "Expected CREATE SEQUENCE in:\n{}", sql);
         assert!(sql.contains("users_seq"), "Expected users_seq in:\n{}", sql);
 
         // Should have a TRIGGER
-        assert!(
-            sql.contains("CREATE OR REPLACE TRIGGER"),
-            "Expected TRIGGER in:\n{}",
-            sql
-        );
-        assert!(
-            sql.contains("BEFORE INSERT"),
-            "Expected BEFORE INSERT in:\n{}",
-            sql
-        );
+        assert!(sql.contains("CREATE OR REPLACE TRIGGER"), "Expected TRIGGER in:\n{}", sql);
+        assert!(sql.contains("BEFORE INSERT"), "Expected BEFORE INSERT in:\n{}", sql);
         assert!(sql.contains("NEXTVAL"), "Expected NEXTVAL in:\n{}", sql);
     }
 
@@ -767,14 +632,11 @@ mod tests {
             comment: None,
         };
 
-        let sql = emitter
-            .emit_statement(&Statement::CreateTable(table))
-            .unwrap();
+        let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
 
         assert!(
             sql.contains("CREATE INDEX org_product_org_id ON org_product (org_id)"),
-            "Expected CREATE INDEX with table-prefixed name in:\n{}",
-            sql
+            "Expected CREATE INDEX with table-prefixed name in:\n{}", sql
         );
     }
 
@@ -789,18 +651,10 @@ mod tests {
 
         let sql = emitter.emit_statement(&stmt).unwrap();
 
-        assert!(
-            sql.contains("-- CREATE USER account"),
-            "Should have commented CREATE USER"
-        );
-        assert!(
-            sql.contains("-- GRANT CONNECT"),
-            "Should have commented GRANT"
-        );
-        assert!(
-            sql.contains("ALTER SESSION SET CURRENT_SCHEMA = account;"),
-            "Should have ALTER SESSION"
-        );
+        assert!(sql.contains("-- CREATE USER account"), "Should have commented CREATE USER");
+        assert!(sql.contains("-- GRANT CONNECT"), "Should have commented GRANT");
+        assert!(sql.contains("ALTER SESSION SET CURRENT_SCHEMA = account;"),
+            "Should have ALTER SESSION");
     }
 
     #[test]
@@ -816,13 +670,7 @@ mod tests {
 
         let sql = emitter.emit_statement(&stmt).unwrap();
         assert!(sql.contains("BEGIN"), "Should use PL/SQL block");
-        assert!(
-            sql.contains("EXECUTE IMMEDIATE"),
-            "Should use EXECUTE IMMEDIATE"
-        );
-        assert!(
-            sql.contains("-942"),
-            "Should check for table-not-found error"
-        );
+        assert!(sql.contains("EXECUTE IMMEDIATE"), "Should use EXECUTE IMMEDIATE");
+        assert!(sql.contains("-942"), "Should check for table-not-found error");
     }
 }

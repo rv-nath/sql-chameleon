@@ -43,13 +43,16 @@ pub enum StringType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TemporalType {
     Date,
-    Time {
-        precision: Option<u8>,
-    },
-    Timestamp {
-        precision: Option<u8>,
-        with_timezone: bool,
-    },
+    Time { precision: Option<u8> },
+    /// MySQL DATETIME (or Oracle's TIMESTAMP without timezone). 8 bytes,
+    /// year range 1000–9999, no auto-update on row change.
+    Datetime { precision: Option<u8> },
+    /// MySQL TIMESTAMP. 4 bytes, year range 1970–2038, can auto-update on
+    /// row change. Semantically distinct from DATETIME — they have different
+    /// storage size, range, and default-on-update behavior, so we preserve
+    /// the distinction through MySQL round-trips. Oracle has no DATETIME,
+    /// so both variants emit `TIMESTAMP` in Oracle output.
+    Timestamp { precision: Option<u8>, with_timezone: bool },
 }
 
 /// Unified data type enum
@@ -153,12 +156,21 @@ pub enum Constraint {
 }
 
 /// Table definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Table {
     pub name: String,
+    /// True if the parsed SQL was `CREATE TABLE IF NOT EXISTS …`. Preserved
+    /// across the round-trip so idempotent re-deploys don't accidentally drop
+    /// data by re-creating a table that already exists.
+    pub if_not_exists: bool,
     pub columns: Vec<Column>,
     pub constraints: Vec<Constraint>,
     pub comment: Option<String>,
+    /// Trailing table options as a single opaque string (e.g.
+    /// `ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`). MySQL-specific; carried
+    /// through MySQL ↔ MySQL round-trips and silently dropped when emitting
+    /// to Oracle or other dialects that don't share the same options vocabulary.
+    pub mysql_table_options: Option<String>,
 }
 
 /// Alter table operations
@@ -202,12 +214,19 @@ pub enum Statement {
         table: String,
         columns: Option<Vec<String>>,
         values: Vec<Vec<Value>>,
+        /// `INSERT IGNORE INTO …`. Used in seed-data INSERTs that need to be
+        /// idempotent on redeploy (skip rows whose PRIMARY/UNIQUE key already
+        /// exists rather than erroring out).
+        ignore: bool,
     },
     CreateIndex {
         name: String,
         table: String,
         columns: Vec<IndexColumn>,
         unique: bool,
+        /// `CREATE INDEX IF NOT EXISTS …`. Preserved so re-running a deploy
+        /// doesn't fail with `Duplicate key name`.
+        if_not_exists: bool,
     },
     CreateDatabase {
         name: String,
@@ -223,38 +242,6 @@ pub enum Statement {
     Commit,
     SetVariable {
         raw_sql: String,
-    },
-    CreateSequence {
-        name: String,
-        start_with: Option<i64>,
-        increment_by: Option<i64>,
-        min_value: Option<i64>,
-        max_value: Option<i64>,
-        cache: Option<u64>,
-        no_cache: bool,
-        cycle: bool,
-    },
-    CreateTrigger {
-        name: String,
-        table: String,
-        body: String,
-    },
-    CreateSynonym {
-        name: String,
-        target: String,
-        is_public: bool,
-    },
-    Grant {
-        raw_sql: String,
-    },
-    Revoke {
-        raw_sql: String,
-    },
-    CreateView {
-        name: String,
-        or_replace: bool,
-        columns: Option<Vec<String>>,
-        query: String,
     },
     /// Pass-through for DML and other statements where the syntax
     /// is identical (or close enough) across dialects (e.g., UPDATE, DELETE)

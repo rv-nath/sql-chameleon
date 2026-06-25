@@ -19,9 +19,7 @@ fn main() {
     println!("=== INPUT (MySQL) ===");
     println!("{}", mysql);
 
-    let oracle = transpiler
-        .convert(mysql, Dialect::MySQL, Dialect::Oracle)
-        .unwrap();
+    let oracle = transpiler.convert(mysql, Dialect::MySQL, Dialect::Oracle).unwrap();
 
     println!("=== OUTPUT (Oracle) ===");
     println!("{}", oracle);
