@@ -328,7 +328,13 @@ impl MySqlEmitter {
                 Some(format!("  {} {} ({})", keyword, Self::quote_ident(name), cols.join(", ")))
             }
 
+            Constraint::Check { name, expression } => match name {
+                Some(n) => Some(format!("  CONSTRAINT {} CHECK ({})", Self::quote_ident(n), expression)),
+                None => Some(format!("  CHECK ({})", expression)),
+            },
+
             // Skip other constraints for now
+            #[allow(unreachable_patterns)]
             _ => None,
         }
     }
@@ -368,6 +374,11 @@ impl MySqlEmitter {
         // AUTO_INCREMENT
         if col.auto_increment {
             parts.push("AUTO_INCREMENT".to_string());
+        }
+
+        // Column comment
+        if let Some(comment) = &col.comment {
+            parts.push(format!("COMMENT '{}'", Self::escape_string_literal(comment)));
         }
 
         parts.join(" ")

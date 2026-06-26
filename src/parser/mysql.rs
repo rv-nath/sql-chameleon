@@ -307,6 +307,7 @@ impl MySqlParser {
         let mut default = None;
         let mut auto_increment = false;
         let mut on_update_timestamp = false;
+        let mut comment = None;
         let mut inline_constraints = Vec::new();
 
         for option in &col.options {
@@ -344,6 +345,17 @@ impl MySqlParser {
                             .push(Constraint::Unique { name: None, columns });
                     }
                 }
+                // Inline `CHECK (expr)` — lift to a table-level constraint.
+                ColumnOption::Check(expr) => {
+                    inline_constraints.push(Constraint::Check {
+                        name: None,
+                        expression: expr.to_string(),
+                    });
+                }
+                // Column comment.
+                ColumnOption::Comment(text) => {
+                    comment = Some(text.clone());
+                }
                 // Inline `REFERENCES other(col)` foreign key.
                 ColumnOption::ForeignKey {
                     foreign_table,
@@ -375,7 +387,7 @@ impl MySqlParser {
             default,
             auto_increment,
             on_update_timestamp,
-            comment: None,
+            comment,
         };
 
         Ok((column, inline_constraints))
@@ -694,6 +706,14 @@ impl MySqlParser {
                     name: index_name,
                     columns: index_columns,
                     unique: false,
+                }))
+            }
+
+            // CHECK (expr)
+            SpConstraint::Check { name, expr } => {
+                Ok(Some(Constraint::Check {
+                    name: name.map(|n| n.value),
+                    expression: expr.to_string(),
                 }))
             }
 

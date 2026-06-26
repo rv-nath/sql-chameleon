@@ -163,6 +163,19 @@ END;
             }
         }
 
+        // Oracle has no inline column COMMENT; emit separate
+        // COMMENT ON COLUMN statements after the table.
+        for col in &table.columns {
+            if let Some(comment) = &col.comment {
+                sql.push_str(&format!(
+                    "\n\nCOMMENT ON COLUMN {table}.{column} IS '{text}';",
+                    table = table.name,
+                    column = col.name,
+                    text = comment.replace('\'', "''")
+                ));
+            }
+        }
+
         Ok(sql)
     }
 
@@ -387,6 +400,12 @@ END;
                 None
             }
 
+            Constraint::Check { name, expression } => match name {
+                Some(n) => Some(format!("  CONSTRAINT {} CHECK ({})", n, expression)),
+                None => Some(format!("  CHECK ({})", expression)),
+            },
+
+            #[allow(unreachable_patterns)]
             _ => None,
         }
     }

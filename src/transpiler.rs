@@ -154,6 +154,25 @@ mod tests {
     }
 
     #[test]
+    fn test_check_and_comment_survive_mysql_roundtrip() {
+        let transpiler = SqlTranspiler::new();
+
+        // Inline CHECK, table-level CHECK, and a column COMMENT.
+        let input = "CREATE TABLE e (\
+                       id INT PRIMARY KEY,\
+                       age INT CHECK (age >= 0),\
+                       status VARCHAR(10) COMMENT 'row status',\
+                       CHECK (age < 200)\
+                     );";
+
+        let output = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+
+        assert!(output.contains("CHECK (age >= 0)"), "inline CHECK lost: {}", output);
+        assert!(output.contains("CHECK (age < 200)"), "table-level CHECK lost: {}", output);
+        assert!(output.contains("COMMENT 'row status'"), "column COMMENT lost: {}", output);
+    }
+
+    #[test]
     fn test_unsupported_dialect() {
         let transpiler = SqlTranspiler::new();
 
