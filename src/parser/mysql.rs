@@ -226,15 +226,17 @@ impl MySqlParser {
         let if_not_exists = create.if_not_exists;
         let mysql_table_options = Self::collect_mysql_table_options(&create);
 
-        // 2. Convert columns
+        // 2. Convert columns, collecting any inline (column-level) constraints
+        //    so they're emitted as table-level constraints rather than lost.
         let mut columns = Vec::new();
+        let mut constraints = Vec::new();
         for col_def in create.columns {
-            let column = self.convert_column(col_def)?;
+            let (column, inline_constraints) = self.convert_column(col_def)?;
             columns.push(column);
+            constraints.extend(inline_constraints);
         }
 
-        // 3. Convert constraints
-        let mut constraints = Vec::new();
+        // 3. Convert table-level constraints
         for constraint in create.constraints {
             if let Some(c) = self.convert_constraint(constraint)? {
                 constraints.push(c);
@@ -282,10 +284,16 @@ impl MySqlParser {
     }
 
     /// Convert a column definition
+    /// Convert a sqlparser column definition into our `Column`, plus any
+    /// table-level constraints implied by *inline* column options
+    /// (`PRIMARY KEY`, `UNIQUE`, inline `REFERENCES`). Our AST keeps
+    /// constraints at the table level and the `Column` struct has no key
+    /// flag, so inline constraints are normalized to table-level entries —
+    /// otherwise they'd be silently dropped on output.
     fn convert_column(
         &self,
         col: sqlparser::ast::ColumnDef,
-    ) -> Result<Column, ParseError> {
+    ) -> Result<(Column, Vec<Constraint>), ParseError> {
         use sqlparser::ast::ColumnOption;
 
         // 1. Get column name
@@ -299,6 +307,7 @@ impl MySqlParser {
         let mut default = None;
         let mut auto_increment = false;
         let mut on_update_timestamp = false;
+        let mut inline_constraints = Vec::new();
 
         for option in &col.options {
             match &option.option {
@@ -323,11 +332,43 @@ impl MySqlParser {
                         }
                     }
                 }
+                // Inline `PRIMARY KEY` / `UNIQUE` — lift to a table-level
+                // constraint over this single column.
+                ColumnOption::Unique { is_primary, .. } => {
+                    let columns = vec![name.clone()];
+                    if *is_primary {
+                        inline_constraints
+                            .push(Constraint::PrimaryKey { name: None, columns });
+                    } else {
+                        inline_constraints
+                            .push(Constraint::Unique { name: None, columns });
+                    }
+                }
+                // Inline `REFERENCES other(col)` foreign key.
+                ColumnOption::ForeignKey {
+                    foreign_table,
+                    referred_columns,
+                    on_delete,
+                    on_update,
+                    ..
+                } => {
+                    inline_constraints.push(Constraint::ForeignKey {
+                        name: None,
+                        columns: vec![name.clone()],
+                        ref_table: self.strip_backticks(&foreign_table.to_string()),
+                        ref_columns: referred_columns
+                            .iter()
+                            .map(|c| c.value.clone())
+                            .collect(),
+                        on_delete: on_delete.as_ref().map(|a| self.convert_ref_action(a)),
+                        on_update: on_update.as_ref().map(|a| self.convert_ref_action(a)),
+                    });
+                }
                 _ => {}
             }
         }
 
-        Ok(Column {
+        let column = Column {
             name,
             data_type,
             nullable,
@@ -335,7 +376,9 @@ impl MySqlParser {
             auto_increment,
             on_update_timestamp,
             comment: None,
-        })
+        };
+
+        Ok((column, inline_constraints))
     }
 
     /// Convert sqlparser data type to our DataType
@@ -707,8 +750,11 @@ impl MySqlParser {
         for op in operations {
             match op {
                 SpAlterOp::AddColumn { column_def, .. } => {
-                    let column = self.convert_column(column_def)?;
+                    let (column, inline_constraints) = self.convert_column(column_def)?;
                     converted_ops.push(crate::ast::AlterOperation::AddColumn(column));
+                    for c in inline_constraints {
+                        converted_ops.push(crate::ast::AlterOperation::AddConstraint(c));
+                    }
                 }
                 SpAlterOp::ModifyColumn { col_name, data_type, options, .. } => {
                     // Wrap into a ColumnDef so we can reuse convert_column
@@ -725,7 +771,7 @@ impl MySqlParser {
                         collation: None,
                         options: column_options,
                     };
-                    let column = self.convert_column(column_def)?;
+                    let (column, _inline_constraints) = self.convert_column(column_def)?;
                     converted_ops.push(crate::ast::AlterOperation::ModifyColumn(column));
                 }
                 SpAlterOp::DropColumn { column_name, .. } => {
@@ -1824,6 +1870,27 @@ mod tests {
             }
             _ => panic!("Expected DropTable statement"),
         }
+    }
+
+    #[test]
+    fn test_parse_inline_primary_key_and_unique() {
+        let parser = MySqlParser::new();
+        let sql = "CREATE TABLE b (id INT NOT NULL PRIMARY KEY, email VARCHAR(255) UNIQUE);";
+
+        let table = match &parser.parse(sql).unwrap()[0] {
+            Statement::CreateTable(t) => t.clone(),
+            other => panic!("Expected CreateTable, got {:?}", other),
+        };
+
+        let has_pk_on_id = table.constraints.iter().any(|c| {
+            matches!(c, Constraint::PrimaryKey { columns, .. } if columns == &vec!["id".to_string()])
+        });
+        let has_unique_on_email = table.constraints.iter().any(|c| {
+            matches!(c, Constraint::Unique { columns, .. } if columns == &vec!["email".to_string()])
+        });
+
+        assert!(has_pk_on_id, "inline PRIMARY KEY on id lost: {:?}", table.constraints);
+        assert!(has_unique_on_email, "inline UNIQUE on email lost: {:?}", table.constraints);
     }
 
     #[test]

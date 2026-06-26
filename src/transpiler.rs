@@ -134,6 +134,26 @@ mod tests {
     }
 
     #[test]
+    fn test_inline_constraints_survive_roundtrip() {
+        // Regression: inline column-level PRIMARY KEY / UNIQUE / FOREIGN KEY
+        // were silently dropped, breaking dependent FKs on fresh deploys.
+        let transpiler = SqlTranspiler::new();
+
+        let input = "CREATE TABLE pp_master (id VARCHAR(36) NOT NULL PRIMARY KEY, code VARCHAR(8) UNIQUE);\
+                     CREATE TABLE child (pp_id VARCHAR(36), FOREIGN KEY (pp_id) REFERENCES pp_master(id));";
+
+        let output = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+
+        assert!(output.contains("PRIMARY KEY (`id`)"), "inline PRIMARY KEY lost: {}", output);
+        assert!(output.contains("UNIQUE (`code`)"), "inline UNIQUE lost: {}", output);
+        assert!(
+            output.contains("REFERENCES `pp_master`(`id`)"),
+            "foreign key lost: {}",
+            output
+        );
+    }
+
+    #[test]
     fn test_unsupported_dialect() {
         let transpiler = SqlTranspiler::new();
 
