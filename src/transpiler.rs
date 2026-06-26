@@ -101,7 +101,7 @@ mod tests {
         assert!(output.contains("DEFAULT CURRENT_TIMESTAMP"), "Should have DEFAULT CURRENT_TIMESTAMP");
         assert!(output.contains("PRIMARY KEY"), "Should have PRIMARY KEY");
         assert!(output.contains("FOREIGN KEY"), "Should have FOREIGN KEY");
-        assert!(output.contains("REFERENCES users"), "Should have REFERENCES");
+        assert!(output.contains("REFERENCES `users`"), "Should have REFERENCES");
         assert!(output.contains("ON DELETE CASCADE"), "Should have ON DELETE CASCADE");
     }
 

@@ -489,6 +489,7 @@ mod tests {
             ],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let stmt = Statement::CreateTable(table);
@@ -527,6 +528,7 @@ mod tests {
                 }],
                 constraints: vec![],
                 comment: None,
+                ..Default::default()
             };
 
             let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -558,6 +560,7 @@ mod tests {
                 }],
                 constraints: vec![],
                 comment: None,
+                ..Default::default()
             };
 
             let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -571,7 +574,8 @@ mod tests {
 
         let types = vec![
             (DataType::Temporal(TemporalType::Date), "DATE"),
-            (DataType::Temporal(TemporalType::Timestamp { precision: None, with_timezone: false }), "DATETIME"),
+            (DataType::Temporal(TemporalType::Datetime { precision: None }), "DATETIME"),
+            (DataType::Temporal(TemporalType::Timestamp { precision: None, with_timezone: false }), "TIMESTAMP"),
         ];
 
         for (data_type, expected) in types {
@@ -588,6 +592,7 @@ mod tests {
                 }],
                 constraints: vec![],
                 comment: None,
+                ..Default::default()
             };
 
             let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -621,6 +626,7 @@ mod tests {
                 }],
                 constraints: vec![],
                 comment: None,
+                ..Default::default()
             };
 
             let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -647,6 +653,7 @@ mod tests {
             }],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -670,6 +677,7 @@ mod tests {
             }],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -693,6 +701,7 @@ mod tests {
             }],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -716,6 +725,7 @@ mod tests {
             }],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -741,6 +751,7 @@ mod tests {
             }],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -767,6 +778,7 @@ mod tests {
             }],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -795,11 +807,12 @@ mod tests {
                 columns: vec!["id".to_string()],
             }],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
         assert!(sql.contains("PRIMARY KEY"), "Expected PRIMARY KEY in: {}", sql);
-        assert!(sql.contains("(id)"), "Expected (id) in: {}", sql);
+        assert!(sql.contains("(`id`)"), "Expected (`id`) in: {}", sql);
     }
 
     #[test]
@@ -822,6 +835,7 @@ mod tests {
                 columns: vec!["email".to_string()],
             }],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -864,11 +878,12 @@ mod tests {
                 on_update: Some(ReferentialAction::SetNull),
             }],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
         assert!(sql.contains("FOREIGN KEY"), "Expected FOREIGN KEY in: {}", sql);
-        assert!(sql.contains("REFERENCES users"), "Expected REFERENCES users in: {}", sql);
+        assert!(sql.contains("REFERENCES `users`"), "Expected REFERENCES `users` in: {}", sql);
         assert!(sql.contains("ON DELETE CASCADE"), "Expected ON DELETE CASCADE in: {}", sql);
         assert!(sql.contains("ON UPDATE SET NULL"), "Expected ON UPDATE SET NULL in: {}", sql);
     }
@@ -899,10 +914,11 @@ mod tests {
                 unique: false,
             }],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
-        assert!(sql.contains("KEY org_id (org_id)"), "Expected KEY index in: {}", sql);
+        assert!(sql.contains("KEY `org_id` (`org_id`)"), "Expected KEY index in: {}", sql);
     }
 
     // ========== DROP TABLE ==========

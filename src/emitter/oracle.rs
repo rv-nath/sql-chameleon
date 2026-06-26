@@ -475,6 +475,7 @@ mod tests {
             ],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -516,6 +517,7 @@ mod tests {
                 }],
                 constraints: vec![],
                 comment: None,
+                ..Default::default()
             };
 
             let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -541,6 +543,7 @@ mod tests {
             }],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -565,6 +568,7 @@ mod tests {
             }],
             constraints: vec![],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -592,6 +596,7 @@ mod tests {
                 columns: vec!["id".to_string()],
             }],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();
@@ -630,6 +635,7 @@ mod tests {
                 unique: false,
             }],
             comment: None,
+            ..Default::default()
         };
 
         let sql = emitter.emit_statement(&Statement::CreateTable(table)).unwrap();

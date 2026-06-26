@@ -35,6 +35,10 @@ impl SqlParser for MySqlParser {
         // `CREATE DATABASE foo`, and the idempotency intent is lost.
         let unwrapped = Self::unwrap_version_comments(sql);
 
+        // sqlparser 0.52 rejects `ALTER TABLE … ADD [COLUMN] IF NOT EXISTS`;
+        // drop that clause before parsing (Oracle has no equivalent anyway).
+        let unwrapped = Self::strip_add_column_if_not_exists(&unwrapped);
+
         // Try parsing the whole file; if it fails, preprocess to strip
         // unsupported statements (CREATE USER, GRANT, etc.) and retry
         let parsed_statements = match Parser::parse_sql(&dialect, &unwrapped) {
@@ -886,6 +890,76 @@ impl MySqlParser {
         out
     }
 
+    /// Strip the `IF NOT EXISTS` clause that follows `ADD` / `ADD COLUMN` in
+    /// `ALTER TABLE` statements.
+    ///
+    /// MySQL/MariaDB accept `ALTER TABLE t ADD [COLUMN] IF NOT EXISTS c …` for
+    /// idempotent migrations, but sqlparser 0.52's `MySqlDialect` rejects the
+    /// clause and fails the whole parse (`Expected: end of statement, found:
+    /// EXISTS`). Oracle has no equivalent idempotency clause on `ADD`, so —
+    /// consistent with how we drop `CREATE INDEX IF NOT EXISTS` — we simply
+    /// remove the clause before parsing and emit a plain `ADD`.
+    ///
+    /// The match is deliberately narrow: only an `IF NOT EXISTS` that directly
+    /// follows `ADD` or `ADD COLUMN` is removed. Other forms (`CREATE TABLE IF
+    /// NOT EXISTS`, `WHERE NOT EXISTS (…)`) are left untouched.
+    pub(crate) fn strip_add_column_if_not_exists(sql: &str) -> String {
+        let bytes = sql.as_bytes();
+
+        // Collect byte ranges of word tokens ([A-Za-z0-9_] runs).
+        let mut words: Vec<(usize, usize)> = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                words.push((start, i));
+            } else {
+                i += 1;
+            }
+        }
+
+        let kw = |r: (usize, usize), k: &str| sql[r.0..r.1].eq_ignore_ascii_case(k);
+
+        // Byte ranges (start of IF .. end of EXISTS) to delete.
+        let mut deletions: Vec<(usize, usize)> = Vec::new();
+        let n = words.len();
+        let mut idx = 0;
+        while idx < n {
+            if kw(words[idx], "add") {
+                // Optional COLUMN keyword between ADD and IF.
+                let mut j = idx + 1;
+                if j < n && kw(words[j], "column") {
+                    j += 1;
+                }
+                if j + 2 < n && kw(words[j], "if") && kw(words[j + 1], "not") && kw(words[j + 2], "exists")
+                {
+                    deletions.push((words[j].0, words[j + 2].1));
+                    idx = j + 3;
+                    continue;
+                }
+            }
+            idx += 1;
+        }
+
+        if deletions.is_empty() {
+            return sql.to_string();
+        }
+
+        // Rebuild the string without the deleted ranges. A leftover double
+        // space (e.g. "ADD COLUMN  c") is harmless to the parser.
+        let mut out = String::with_capacity(sql.len());
+        let mut pos = 0;
+        for (s, e) in deletions {
+            out.push_str(&sql[pos..s]);
+            pos = e;
+        }
+        out.push_str(&sql[pos..]);
+        out
+    }
+
     /// Strip backticks from identifiers
     /// e.g., `users` → users, `account` → account
     fn strip_backticks(&self, name: &str) -> String {
@@ -1113,8 +1187,8 @@ mod tests {
         };
 
         assert!(
-            matches!(table.columns[0].data_type, DataType::Temporal(TemporalType::Timestamp { .. })),
-            "Expected DATETIME/Timestamp, got {:?}",
+            matches!(table.columns[0].data_type, DataType::Temporal(TemporalType::Datetime { .. })),
+            "Expected DATETIME/Datetime, got {:?}",
             table.columns[0].data_type
         );
     }
@@ -1659,7 +1733,7 @@ mod tests {
         let result = parser.parse(sql).unwrap();
 
         match &result[0] {
-            Statement::Insert { table, columns, values } => {
+            Statement::Insert { table, columns, values, .. } => {
                 assert_eq!(table, "t");
                 assert!(columns.is_none(), "No column list in this INSERT");
                 assert_eq!(values.len(), 1, "One row of values");
@@ -1750,5 +1824,58 @@ mod tests {
             }
             _ => panic!("Expected DropTable statement"),
         }
+    }
+
+    #[test]
+    fn test_parse_alter_add_column_if_not_exists() {
+        let parser = MySqlParser::new();
+        // MySQL/MariaDB idempotent migration form that sqlparser 0.52 rejects.
+        let sql = "ALTER TABLE wa_channels ADD COLUMN IF NOT EXISTS waba_id varchar(36);";
+
+        let result = parser.parse(sql);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+        let statements = result.unwrap();
+        assert_eq!(statements.len(), 1);
+
+        match &statements[0] {
+            Statement::AlterTable { name, operations } => {
+                assert_eq!(name, "wa_channels");
+                assert_eq!(operations.len(), 1);
+                match &operations[0] {
+                    AlterOperation::AddColumn(col) => assert_eq!(col.name, "waba_id"),
+                    other => panic!("Expected AddColumn, got {:?}", other),
+                }
+            }
+            other => panic!("Expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_add_if_not_exists_no_column_keyword() {
+        // MariaDB also allows `ADD IF NOT EXISTS` without the COLUMN keyword.
+        let parser = MySqlParser::new();
+        let sql = "alter table t add if not exists c int;";
+        let result = parser.parse(sql);
+        assert!(result.is_ok(), "Failed to parse: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_strip_add_column_if_not_exists_leaves_other_forms_untouched() {
+        // CREATE TABLE IF NOT EXISTS and WHERE NOT EXISTS must NOT be altered.
+        let create = "CREATE TABLE IF NOT EXISTS t (id INT);";
+        assert_eq!(MySqlParser::strip_add_column_if_not_exists(create), create);
+
+        let subquery = "DELETE FROM t WHERE NOT EXISTS (SELECT 1 FROM u);";
+        assert_eq!(MySqlParser::strip_add_column_if_not_exists(subquery), subquery);
+
+        // The ADD COLUMN form should have its IF NOT EXISTS removed.
+        let add = "ALTER TABLE t ADD COLUMN IF NOT EXISTS c int;";
+        let stripped = MySqlParser::strip_add_column_if_not_exists(add);
+        assert!(
+            !stripped.to_ascii_uppercase().contains("IF NOT EXISTS"),
+            "IF NOT EXISTS should be stripped: {:?}",
+            stripped
+        );
+        assert!(stripped.to_ascii_uppercase().contains("ADD COLUMN"));
     }
 }
