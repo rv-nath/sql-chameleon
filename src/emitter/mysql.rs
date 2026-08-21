@@ -77,6 +77,14 @@ impl SqlEmitter for MySqlEmitter {
             Statement::AlterTable { name, operations } => {
                 self.emit_alter_table(name, operations)
             }
+            Statement::DropIndex { name, table } => Ok(format!(
+                "DROP INDEX {} ON {};",
+                Self::quote_ident(name),
+                Self::quote_ident(table),
+            )),
+            // Already-terminated verbatim source text — no trailing `;` is
+            // added, since a DELIMITER block carries its own terminators.
+            Statement::DialectSpecificBlock { raw_sql, .. } => Ok(raw_sql.clone()),
             Statement::RawStatement { raw_sql } => Ok(format!("{};", raw_sql)),
         }
     }
@@ -408,6 +416,10 @@ impl MySqlEmitter {
             DataType::Integer(IntegerType::SmallInt) => "SMALLINT".to_string(),
             DataType::Integer(IntegerType::Int) => "INT".to_string(),
             DataType::Integer(IntegerType::BigInt) => "BIGINT".to_string(),
+            DataType::UnsignedInteger(IntegerType::TinyInt) => "TINYINT UNSIGNED".to_string(),
+            DataType::UnsignedInteger(IntegerType::SmallInt) => "SMALLINT UNSIGNED".to_string(),
+            DataType::UnsignedInteger(IntegerType::Int) => "INT UNSIGNED".to_string(),
+            DataType::UnsignedInteger(IntegerType::BigInt) => "BIGINT UNSIGNED".to_string(),
 
             // Strings
             DataType::String(StringType::Char { length }) => format!("CHAR({})", length),

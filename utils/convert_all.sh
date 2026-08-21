@@ -24,15 +24,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Resolve paths
+# Resolve paths. This script lives in utils/, so the crate root — and with
+# it target/ and Cargo.toml — is one level up. Looking for them next to the
+# script instead made every conversion fail with "No such file or directory".
 SRC_DIR="$(realpath "$SRC_DIR")"
 TGT_DIR="$(realpath -m "$TGT_DIR")"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BINARY="$SCRIPT_DIR/target/debug/schema-conv"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ ! -f "$BINARY" ]; then
+# Prefer a release build when one is present — that is what you get from
+# `cargo build --release`, and batch runs over hundreds of files are much
+# faster with it. Fall back to a debug build, and build one if neither exists.
+if [ -x "$PROJECT_DIR/target/release/schema-conv" ]; then
+    BINARY="$PROJECT_DIR/target/release/schema-conv"
+elif [ -x "$PROJECT_DIR/target/debug/schema-conv" ]; then
+    BINARY="$PROJECT_DIR/target/debug/schema-conv"
+else
     echo "Binary not found. Building..."
-    cargo build --manifest-path "$SCRIPT_DIR/Cargo.toml"
+    cargo build --release --manifest-path "$PROJECT_DIR/Cargo.toml" || exit 1
+    BINARY="$PROJECT_DIR/target/release/schema-conv"
 fi
 
 TOTAL=0

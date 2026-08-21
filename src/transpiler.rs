@@ -181,4 +181,97 @@ mod tests {
 
         assert!(result.is_err(), "Should fail for unsupported dialect");
     }
+
+    #[test]
+    fn test_unsigned_survives_mysql_roundtrip() {
+        let transpiler = SqlTranspiler::new();
+        let input = "CREATE TABLE t (secs INT UNSIGNED NOT NULL DEFAULT 0);";
+
+        let output = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+
+        // Dropping UNSIGNED here would silently halve the column's range.
+        assert!(output.contains("INT UNSIGNED"), "UNSIGNED lost: {}", output);
+    }
+
+    #[test]
+    fn test_unsigned_bigint_widens_for_oracle() {
+        let transpiler = SqlTranspiler::new();
+        let input = "CREATE TABLE t (a BIGINT UNSIGNED, b BIGINT);";
+
+        let output = transpiler.convert(input, Dialect::MySQL, Dialect::Oracle).unwrap();
+
+        // Unsigned BIGINT max is 20 digits, signed is 19.
+        assert!(output.contains("NUMBER(20)"), "unsigned BIGINT not widened: {}", output);
+        assert!(output.contains("NUMBER(19)"), "signed BIGINT changed: {}", output);
+    }
+
+    #[test]
+    fn test_add_unique_key_survives_mysql_roundtrip() {
+        let transpiler = SqlTranspiler::new();
+        let input = "ALTER TABLE t ADD UNIQUE KEY uk_t_kc (kc_id);";
+
+        let output = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+
+        // The whole ALTER used to be rejected outright with
+        // "Unsupported ALTER TABLE operation".
+        assert!(output.contains("ALTER TABLE t ADD UNIQUE"), "got: {}", output);
+        assert!(output.contains("`kc_id`"), "column lost: {}", output);
+    }
+
+    #[test]
+    fn test_drop_index_drops_on_clause_for_oracle() {
+        let transpiler = SqlTranspiler::new();
+        let input = "DROP INDEX `idx_foo` ON `bar`;";
+
+        let mysql = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+        assert!(mysql.contains("ON `bar`"), "MySQL needs the ON clause: {}", mysql);
+
+        // Oracle index names are schema-global — `ON <table>` is a syntax error.
+        let oracle = transpiler.convert(input, Dialect::MySQL, Dialect::Oracle).unwrap();
+        assert!(oracle.contains("DROP INDEX idx_foo;"), "got: {}", oracle);
+        assert!(!oracle.contains(" ON bar"), "ON clause leaked into Oracle: {}", oracle);
+    }
+
+    #[test]
+    fn test_delimiter_block_verbatim_for_mysql_commented_for_oracle() {
+        let transpiler = SqlTranspiler::new();
+        let input = "DELIMITER //\n\
+                     CREATE TRIGGER trg BEFORE INSERT ON t\n\
+                     FOR EACH ROW\n\
+                     BEGIN\n\
+                       SET NEW.a = NEW.b;\n\
+                     END;\n\
+                     //\n\
+                     DELIMITER ;\n";
+
+        let mysql = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+        assert!(mysql.contains("DELIMITER //"), "wrapper lost: {}", mysql);
+        assert!(mysql.contains("SET NEW.a = NEW.b;"), "body lost: {}", mysql);
+        // A stray trailing `;` after the block would break the script.
+        assert!(mysql.trim_end().ends_with("DELIMITER ;"), "got: {}", mysql);
+
+        let oracle = transpiler.convert(input, Dialect::MySQL, Dialect::Oracle).unwrap();
+        assert!(oracle.contains("Not translated to Oracle"), "no warning: {}", oracle);
+        // Every line of the untranslated block must be commented out.
+        for line in oracle.lines().filter(|l| l.contains("CREATE TRIGGER")) {
+            assert!(line.trim_start().starts_with("--"), "live trigger SQL: {}", line);
+        }
+    }
+
+    #[test]
+    fn test_prepared_statement_does_not_fail_the_file() {
+        let transpiler = SqlTranspiler::new();
+        let input = "CREATE TABLE a (id INT);\n\
+                     SET @sql = 'SELECT 1';\n\
+                     PREPARE stmt FROM @sql;\n\
+                     EXECUTE stmt;\n\
+                     DEALLOCATE PREPARE stmt;\n\
+                     CREATE TABLE b (id INT);\n";
+
+        let output = transpiler.convert(input, Dialect::MySQL, Dialect::MySQL).unwrap();
+
+        assert!(output.contains("CREATE TABLE `a`"), "statement before block lost: {}", output);
+        assert!(output.contains("CREATE TABLE `b`"), "statement after block lost: {}", output);
+        assert!(output.contains("PREPARE stmt FROM @sql;"), "block lost: {}", output);
+    }
 }

@@ -90,6 +90,25 @@ impl SqlEmitter for OracleEmitter {
             Statement::AlterTable { name, operations } => {
                 self.emit_alter_table(name, operations)
             }
+            Statement::DropIndex { name, table: _ } => {
+                // Oracle index names are schema-global, so there is no
+                // `ON <table>` clause to carry over.
+                Ok(format!("DROP INDEX {};", name))
+            }
+            Statement::DialectSpecificBlock { raw_sql, note } => {
+                // No Oracle equivalent is synthesized. Comment the block out
+                // rather than dropping it, so the gap is visible in the
+                // output instead of disappearing silently.
+                let commented: Vec<String> = raw_sql
+                    .lines()
+                    .map(|line| format!("-- {}", line))
+                    .collect();
+                Ok(format!(
+                    "-- [schema-conv] Not translated to Oracle: {}. Review and port manually.\n{}",
+                    note,
+                    commented.join("\n"),
+                ))
+            }
             Statement::RawStatement { raw_sql } => Ok(format!("{};", raw_sql)),
         }
     }
@@ -245,6 +264,14 @@ END;
             DataType::Integer(IntegerType::SmallInt) => "NUMBER(5)".to_string(),
             DataType::Integer(IntegerType::Int) => "NUMBER(10)".to_string(),
             DataType::Integer(IntegerType::BigInt) => "NUMBER(19)".to_string(),
+            // Oracle has no unsigned integers; widen the precision so the
+            // whole MySQL unsigned range still fits. Only BIGINT actually
+            // needs more digits (unsigned max is 20 digits vs 19 signed) —
+            // the narrower widths already had the headroom.
+            DataType::UnsignedInteger(IntegerType::TinyInt) => "NUMBER(3)".to_string(),
+            DataType::UnsignedInteger(IntegerType::SmallInt) => "NUMBER(5)".to_string(),
+            DataType::UnsignedInteger(IntegerType::Int) => "NUMBER(10)".to_string(),
+            DataType::UnsignedInteger(IntegerType::BigInt) => "NUMBER(20)".to_string(),
 
             // Strings
             DataType::String(StringType::Char { length }) => {

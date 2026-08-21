@@ -10,6 +10,16 @@ use crate::ast::{
 use crate::error::ParseError;
 use super::SqlParser;
 
+/// One piece of the input, in source order, as produced by
+/// [`MySqlParser::split_mysql_only_statements`].
+enum Segment {
+    /// SQL text to hand to sqlparser.
+    Sql(String),
+    /// A statement recovered before sqlparser ever saw it, because
+    /// sqlparser-rs can't parse the MySQL syntax that produced it.
+    Ready(Statement),
+}
+
 /// Parser for MySQL SQL dialect
 pub struct MySqlParser;
 
@@ -39,21 +49,39 @@ impl SqlParser for MySqlParser {
         // drop that clause before parsing (Oracle has no equivalent anyway).
         let unwrapped = Self::strip_add_column_if_not_exists(&unwrapped);
 
-        // Try parsing the whole file; if it fails, preprocess to strip
-        // unsupported statements (CREATE USER, GRANT, etc.) and retry
-        let parsed_statements = match Parser::parse_sql(&dialect, &unwrapped) {
-            Ok(stmts) => stmts,
-            Err(_) => {
-                let cleaned = self.preprocess_sql(&unwrapped);
-                Parser::parse_sql(&dialect, &cleaned)?
-            }
-        };
+        // Lift out the MySQL-only constructs sqlparser-rs cannot parse at
+        // all (prepared statements, DELIMITER-wrapped routine bodies,
+        // `DROP INDEX … ON …`) before it ever sees them. Parser::parse_sql
+        // is all-or-nothing, so without this a single `PREPARE … FROM @sql`
+        // on line 29 fails an entire 900-line schema file.
+        let segments = Self::split_mysql_only_statements(&unwrapped);
 
         // Step 2: Convert each sqlparser statement to our AST
         let mut results = Vec::new();
-        for stmt in parsed_statements {
-            let converted = self.convert_statement(stmt)?;
-            results.push(converted);
+        for segment in segments {
+            match segment {
+                Segment::Ready(stmt) => results.push(stmt),
+                Segment::Sql(text) => {
+                    // Chunks between lifted-out blocks are routinely nothing
+                    // but blank lines and comments; sqlparser has no
+                    // statement to return for those.
+                    if Self::is_only_comments(&text) {
+                        continue;
+                    }
+                    // Try parsing the chunk; if it fails, preprocess to strip
+                    // unsupported statements (CREATE USER, GRANT, etc.) and retry
+                    let parsed_statements = match Parser::parse_sql(&dialect, &text) {
+                        Ok(stmts) => stmts,
+                        Err(_) => {
+                            let cleaned = self.preprocess_sql(&text);
+                            Parser::parse_sql(&dialect, &cleaned)?
+                        }
+                    };
+                    for stmt in parsed_statements {
+                        results.push(self.convert_statement(stmt)?);
+                    }
+                }
+            }
         }
 
         Ok(results)
@@ -409,6 +437,25 @@ impl MySqlParser {
             SpDataType::Int(_) | SpDataType::Integer(_) => Ok(DataType::Integer(IntegerType::Int)),
             SpDataType::BigInt(_) => Ok(DataType::Integer(IntegerType::BigInt)),
 
+            // UNSIGNED integers. Deliberately *not* folded into the signed
+            // variants above — UNSIGNED doubles the positive range, so
+            // dropping it silently shrinks what the column can hold. Note
+            // that the `TINYINT(1)` → BOOLEAN idiom is not applied here:
+            // `TINYINT(1) UNSIGNED` is a narrow integer, not MySQL's
+            // conventional boolean spelling.
+            SpDataType::UnsignedTinyInt(_) => {
+                Ok(DataType::UnsignedInteger(IntegerType::TinyInt))
+            }
+            SpDataType::UnsignedSmallInt(_) => {
+                Ok(DataType::UnsignedInteger(IntegerType::SmallInt))
+            }
+            SpDataType::UnsignedInt(_) | SpDataType::UnsignedInteger(_) => {
+                Ok(DataType::UnsignedInteger(IntegerType::Int))
+            }
+            SpDataType::UnsignedBigInt(_) => {
+                Ok(DataType::UnsignedInteger(IntegerType::BigInt))
+            }
+
             // Text types
             SpDataType::Char(len) | SpDataType::Character(len) => {
                 let length = self.extract_char_length(len).unwrap_or(1);
@@ -635,6 +682,16 @@ impl MySqlParser {
             }
 
             // UNIQUE
+            //
+            // NOTE: MySQL's `UNIQUE KEY uk_foo (col)` spelling puts the name
+            // in sqlparser's `index_name`, not `name`, so it is dropped here
+            // and the constraint comes out anonymous. That is deliberate:
+            // MySQL index names are scoped per table, Oracle constraint
+            // names are schema-global, so carrying them over collides
+            // (ORA-02264) wherever two tables in one schema use the same
+            // index name — which is common for `UNIQUE KEY `name` (`name`)`.
+            // Preserving them needs schema-wide name deduplication in the
+            // Oracle emitter first.
             SpConstraint::Unique { name, columns, .. } => {
                 let constraint_name = match name {
                     Some(n) => Some(n.value),
@@ -805,6 +862,19 @@ impl MySqlParser {
                         new_name: new_column_name.value,
                     });
                 }
+                // ADD [CONSTRAINT] PRIMARY KEY / UNIQUE / FOREIGN KEY /
+                // CHECK / INDEX — reuse the same converter the CREATE TABLE
+                // path uses so the two spellings can't drift apart.
+                SpAlterOp::AddConstraint(constraint) => {
+                    if let Some(c) = self.convert_constraint(constraint)? {
+                        converted_ops.push(crate::ast::AlterOperation::AddConstraint(c));
+                    }
+                }
+                SpAlterOp::DropConstraint { name, .. } => {
+                    converted_ops.push(crate::ast::AlterOperation::DropConstraint {
+                        name: name.value,
+                    });
+                }
                 _ => {
                     return Err(ParseError::new(format!(
                         "Unsupported ALTER TABLE operation: {:?}",
@@ -889,6 +959,222 @@ impl MySqlParser {
 
     /// Preprocess SQL to remove statements that sqlparser can't handle
     /// (e.g., CREATE USER, GRANT). These are MySQL admin statements, not schema DDL.
+    /// Split the input into segments, lifting out the MySQL-only constructs
+    /// that sqlparser-rs cannot parse at all:
+    ///
+    ///   * `PREPARE stmt FROM @sql` / `EXECUTE` / `DEALLOCATE PREPARE` —
+    ///     sqlparser only knows the Postgres `PREPARE name AS …` spelling.
+    ///   * `DELIMITER //` … `DELIMITER ;` — `DELIMITER` is a client-side
+    ///     directive, not SQL, and the routine bodies it wraps contain
+    ///     statement-internal semicolons.
+    ///   * `DROP INDEX name ON table` — sqlparser has no MySQL `ON table`
+    ///     clause on DROP INDEX.
+    ///
+    /// The first two become [`Statement::DialectSpecificBlock`] (carried
+    /// verbatim); the third becomes a real [`Statement::DropIndex`], since
+    /// it does have a clean Oracle equivalent.
+    ///
+    /// Matching is line-oriented and only looks at lines that *begin* with
+    /// one of these keywords, with whole-line `/* … */` banner comments
+    /// tracked so keywords mentioned inside them are left alone. A rogue
+    /// match would only pass the text through verbatim, never corrupt it.
+    fn split_mysql_only_statements(sql: &str) -> Vec<Segment> {
+        fn flush(segments: &mut Vec<Segment>, plain: &mut String) {
+            if !plain.is_empty() {
+                segments.push(Segment::Sql(std::mem::take(plain)));
+            }
+        }
+
+        let lines: Vec<&str> = sql.lines().collect();
+        let mut segments: Vec<Segment> = Vec::new();
+        let mut plain = String::new();
+        let mut in_block_comment = false;
+        let mut i = 0;
+
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim();
+            let upper = trimmed.to_ascii_uppercase();
+
+            if in_block_comment {
+                if trimmed.contains("*/") {
+                    in_block_comment = false;
+                }
+                plain.push_str(line);
+                plain.push('\n');
+                i += 1;
+                continue;
+            }
+            if trimmed.starts_with("/*") && !trimmed.contains("*/") {
+                in_block_comment = true;
+                plain.push_str(line);
+                plain.push('\n');
+                i += 1;
+                continue;
+            }
+
+            if Self::begins_with_keyword(&upper, "DELIMITER") {
+                let (raw_sql, next) = Self::take_delimiter_block(&lines, i);
+                flush(&mut segments, &mut plain);
+                segments.push(Segment::Ready(Statement::DialectSpecificBlock {
+                    raw_sql,
+                    note: "MySQL DELIMITER block (stored routine or trigger body)"
+                        .to_string(),
+                }));
+                i = next;
+                continue;
+            }
+
+            if Self::begins_with_keyword(&upper, "PREPARE")
+                || Self::begins_with_keyword(&upper, "EXECUTE")
+                || Self::begins_with_keyword(&upper, "DEALLOCATE")
+            {
+                let (raw_sql, next) = Self::take_statement(&lines, i);
+                flush(&mut segments, &mut plain);
+                segments.push(Segment::Ready(Statement::DialectSpecificBlock {
+                    raw_sql,
+                    note: "MySQL prepared statement".to_string(),
+                }));
+                i = next;
+                continue;
+            }
+
+            if upper.starts_with("DROP INDEX ") {
+                let (text, next) = Self::take_statement(&lines, i);
+                if let Some(stmt) = Self::parse_drop_index_on(&text) {
+                    flush(&mut segments, &mut plain);
+                    segments.push(Segment::Ready(stmt));
+                    i = next;
+                    continue;
+                }
+                // Not the `DROP INDEX x ON t` shape — fall through and let
+                // sqlparser report on it, so the error names the real syntax.
+            }
+
+            plain.push_str(line);
+            plain.push('\n');
+            i += 1;
+        }
+
+        flush(&mut segments, &mut plain);
+        segments
+    }
+
+    /// True if `upper` starts with `keyword` as a whole word.
+    fn begins_with_keyword(upper: &str, keyword: &str) -> bool {
+        match upper.strip_prefix(keyword) {
+            Some(rest) => rest.is_empty() || rest.starts_with(|c: char| !c.is_alphanumeric() && c != '_'),
+            None => false,
+        }
+    }
+
+    /// Take lines from `start` up to and including the one that ends the
+    /// statement with `;`. Returns the verbatim text and the next index.
+    fn take_statement(lines: &[&str], start: usize) -> (String, usize) {
+        let mut out = String::new();
+        let mut i = start;
+        while i < lines.len() {
+            out.push_str(lines[i]);
+            let ends = lines[i].trim_end().ends_with(';');
+            i += 1;
+            if ends {
+                break;
+            }
+            out.push('\n');
+        }
+        (out, i)
+    }
+
+    /// Take a whole `DELIMITER x` … `DELIMITER ;` region verbatim, wrapper
+    /// lines included — the wrapper is what makes the body's internal
+    /// semicolons legal, so re-emitting the body without it would produce a
+    /// broken script. A lone `DELIMITER ;` (nothing to close) is returned by
+    /// itself.
+    fn take_delimiter_block(lines: &[&str], start: usize) -> (String, usize) {
+        let opener = lines[start].trim();
+        let custom = opener
+            .split_whitespace()
+            .nth(1)
+            .map(|d| d != ";")
+            .unwrap_or(false);
+        if !custom {
+            return (lines[start].to_string(), start + 1);
+        }
+
+        let mut out = String::from(lines[start]);
+        let mut i = start + 1;
+        while i < lines.len() {
+            out.push('\n');
+            out.push_str(lines[i]);
+            let trimmed = lines[i].trim();
+            let upper = trimmed.to_ascii_uppercase();
+            let restores = Self::begins_with_keyword(&upper, "DELIMITER")
+                && trimmed.split_whitespace().nth(1) == Some(";");
+            i += 1;
+            if restores {
+                break;
+            }
+        }
+        (out, i)
+    }
+
+    /// Parse MySQL's `DROP INDEX <name> ON <table>[;]`. Returns `None` for
+    /// anything that isn't exactly that shape.
+    fn parse_drop_index_on(text: &str) -> Option<Statement> {
+        let cleaned = text.trim().trim_end_matches(';');
+        let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+        if tokens.len() != 5 {
+            return None;
+        }
+        if !tokens[0].eq_ignore_ascii_case("DROP")
+            || !tokens[1].eq_ignore_ascii_case("INDEX")
+            || !tokens[3].eq_ignore_ascii_case("ON")
+        {
+            return None;
+        }
+        Some(Statement::DropIndex {
+            name: Self::unquote_ident(tokens[2]),
+            table: Self::unquote_ident(tokens[4]),
+        })
+    }
+
+    /// Strip surrounding backticks from an identifier. Free-function twin of
+    /// [`Self::strip_backticks`], for the pre-parse pass where there is no
+    /// parser instance in hand yet.
+    fn unquote_ident(name: &str) -> String {
+        let trimmed = name.trim();
+        trimmed
+            .strip_prefix('`')
+            .and_then(|n| n.strip_suffix('`'))
+            .unwrap_or(trimmed)
+            .to_string()
+    }
+
+    /// True if `text` holds nothing but whitespace and SQL comments — the
+    /// usual content of the gaps left behind after lifting blocks out.
+    fn is_only_comments(text: &str) -> bool {
+        let mut rest = text;
+        let mut stripped = String::with_capacity(text.len());
+        // Remove /* … */ spans first so a `--` inside one isn't mistaken
+        // for a line comment (and vice versa).
+        while let Some(open) = rest.find("/*") {
+            stripped.push_str(&rest[..open]);
+            match rest[open + 2..].find("*/") {
+                Some(close) => rest = &rest[open + 2 + close + 2..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        stripped.push_str(rest);
+
+        stripped.lines().all(|line| {
+            let t = line.trim();
+            t.is_empty() || t.starts_with("--") || t.starts_with('#')
+        })
+    }
+
     fn preprocess_sql(&self, sql: &str) -> String {
         sql.lines()
             .filter(|line| {
@@ -1964,5 +2250,187 @@ mod tests {
             stripped
         );
         assert!(stripped.to_ascii_uppercase().contains("ADD COLUMN"));
+    }
+
+    // ── MySQL-only constructs sqlparser-rs can't parse ─────────────────
+
+    #[test]
+    fn test_parse_unsigned_int_stays_unsigned() {
+        let parser = MySqlParser::new();
+        let sql = "CREATE TABLE t (\
+                     a TINYINT UNSIGNED,\
+                     b SMALLINT UNSIGNED,\
+                     c INT UNSIGNED,\
+                     d BIGINT UNSIGNED\
+                   );";
+
+        let result = parser.parse(sql).unwrap();
+        let table = match &result[0] {
+            Statement::CreateTable(t) => t,
+            other => panic!("Expected CreateTable, got {:?}", other),
+        };
+
+        let expected = [
+            IntegerType::TinyInt,
+            IntegerType::SmallInt,
+            IntegerType::Int,
+            IntegerType::BigInt,
+        ];
+        for (col, want) in table.columns.iter().zip(expected) {
+            assert_eq!(
+                col.data_type,
+                DataType::UnsignedInteger(want.clone()),
+                "column {} lost its UNSIGNED",
+                col.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_add_unique_key() {
+        let parser = MySqlParser::new();
+        let sql = "ALTER TABLE agents_meta ADD UNIQUE KEY uk_agents_meta_kc_id (kc_id);";
+
+        let result = parser.parse(sql).unwrap();
+        let ops = match &result[0] {
+            Statement::AlterTable { operations, .. } => operations,
+            other => panic!("Expected AlterTable, got {:?}", other),
+        };
+
+        // The index name is intentionally dropped — see the NOTE on the
+        // UNIQUE arm of `convert_constraint`.
+        match &ops[0] {
+            crate::ast::AlterOperation::AddConstraint(Constraint::Unique { columns, .. }) => {
+                assert_eq!(columns, &vec!["kc_id".to_string()]);
+            }
+            other => panic!("Expected AddConstraint(Unique), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_table_drop_constraint() {
+        let parser = MySqlParser::new();
+        let sql = "ALTER TABLE t DROP CONSTRAINT uk_t_email;";
+
+        let result = parser.parse(sql).unwrap();
+        let ops = match &result[0] {
+            Statement::AlterTable { operations, .. } => operations,
+            other => panic!("Expected AlterTable, got {:?}", other),
+        };
+        match &ops[0] {
+            crate::ast::AlterOperation::DropConstraint { name } => {
+                assert_eq!(name, "uk_t_email");
+            }
+            other => panic!("Expected DropConstraint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_drop_index_on_table() {
+        let parser = MySqlParser::new();
+        let sql = "DROP INDEX `idx_foo` ON `bar`;";
+
+        let result = parser.parse(sql).unwrap();
+        match &result[0] {
+            Statement::DropIndex { name, table } => {
+                assert_eq!(name, "idx_foo");
+                assert_eq!(table, "bar");
+            }
+            other => panic!("Expected DropIndex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_prepared_statement_block() {
+        let parser = MySqlParser::new();
+        let sql = "SET @sql = 'SELECT 1';\n\
+                   PREPARE stmt FROM @sql;\n\
+                   EXECUTE stmt;\n\
+                   DEALLOCATE PREPARE stmt;\n";
+
+        let result = parser.parse(sql).unwrap();
+        assert_eq!(result.len(), 4, "got {:?}", result);
+
+        let raws: Vec<&String> = result
+            .iter()
+            .filter_map(|s| match s {
+                Statement::DialectSpecificBlock { raw_sql, .. } => Some(raw_sql),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raws.len(), 3, "expected 3 pass-through blocks, got {:?}", result);
+        assert!(raws[0].contains("PREPARE stmt FROM @sql"));
+        assert!(raws[2].contains("DEALLOCATE PREPARE stmt"));
+    }
+
+    #[test]
+    fn test_parse_delimiter_block_kept_verbatim() {
+        let parser = MySqlParser::new();
+        let sql = "DELIMITER //\n\
+                   CREATE TRIGGER trg BEFORE INSERT ON t\n\
+                   FOR EACH ROW\n\
+                   BEGIN\n\
+                     SET NEW.a = NEW.b;\n\
+                   END;\n\
+                   //\n\
+                   DELIMITER ;\n";
+
+        let result = parser.parse(sql).unwrap();
+        assert_eq!(result.len(), 1, "got {:?}", result);
+        match &result[0] {
+            Statement::DialectSpecificBlock { raw_sql, note } => {
+                // The DELIMITER wrapper is what makes the body's internal
+                // semicolons legal, so it has to survive too.
+                assert!(raw_sql.starts_with("DELIMITER //"), "got {:?}", raw_sql);
+                assert!(raw_sql.trim_end().ends_with("DELIMITER ;"), "got {:?}", raw_sql);
+                assert!(raw_sql.contains("SET NEW.a = NEW.b;"));
+                assert!(note.contains("DELIMITER"));
+            }
+            other => panic!("Expected DialectSpecificBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_mysql_only_block_does_not_fail_surrounding_statements() {
+        // Regression: Parser::parse_sql is all-or-nothing, so one
+        // unparseable statement used to fail the entire file.
+        let parser = MySqlParser::new();
+        let sql = "CREATE TABLE a (id INT);\n\
+                   PREPARE stmt FROM @sql;\n\
+                   -- a comment in the gap\n\
+                   CREATE TABLE b (id INT);\n";
+
+        let result = parser.parse(sql).unwrap();
+        assert_eq!(result.len(), 3, "got {:?}", result);
+        assert!(matches!(result[0], Statement::CreateTable(_)));
+        assert!(matches!(result[1], Statement::DialectSpecificBlock { .. }));
+        assert!(matches!(result[2], Statement::CreateTable(_)));
+    }
+
+    #[test]
+    fn test_keyword_inside_block_comment_is_not_lifted_out() {
+        let parser = MySqlParser::new();
+        let sql = "/*\n\
+                   DROP INDEX idx ON t;\n\
+                   */\n\
+                   CREATE TABLE a (id INT);\n";
+
+        let result = parser.parse(sql).unwrap();
+        assert_eq!(result.len(), 1, "commented-out DDL was resurrected: {:?}", result);
+        assert!(matches!(result[0], Statement::CreateTable(_)));
+    }
+
+    #[test]
+    fn test_drop_index_without_on_clause_still_reaches_sqlparser() {
+        // The Oracle/Postgres spelling has no `ON`, so it must not be
+        // swallowed by the pre-pass — sqlparser should be the one to
+        // report on it.
+        let parser = MySqlParser::new();
+        let result = parser.parse("DROP INDEX idx_foo;");
+        assert!(
+            !matches!(result.as_deref(), Ok([Statement::DropIndex { .. }])),
+            "pre-pass claimed a statement it shouldn't handle: {:?}",
+            result
+        );
     }
 }

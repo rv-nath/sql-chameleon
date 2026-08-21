@@ -60,6 +60,12 @@ pub enum TemporalType {
 pub enum DataType {
     // Numeric
     Integer(IntegerType),
+    /// MySQL's `INT UNSIGNED` family. Kept distinct from `Integer` because
+    /// UNSIGNED doubles the positive range — folding `INT UNSIGNED` into a
+    /// plain `INT` silently halves the max storable value (4294967295 →
+    /// 2147483647) on a MySQL → MySQL round-trip. Oracle has no unsigned
+    /// integers, so this widens the emitted NUMBER precision instead.
+    UnsignedInteger(IntegerType),
     Decimal { precision: u8, scale: u8 },
     Float,
     Boolean,
@@ -242,6 +248,23 @@ pub enum Statement {
     Commit,
     SetVariable {
         raw_sql: String,
+    },
+    /// `DROP INDEX <name> ON <table>`. MySQL requires the `ON <table>`
+    /// clause; Oracle index names are schema-global and take no table, so
+    /// the table is carried here and dropped when emitting Oracle.
+    DropIndex {
+        name: String,
+        table: String,
+    },
+    /// A verbatim chunk of source SQL with no dialect-neutral representation
+    /// — MySQL prepared-statement blocks (`PREPARE … FROM @sql`) and
+    /// `DELIMITER`-wrapped routine bodies (triggers, procedures). Emitted
+    /// unchanged for a MySQL target so round-trips stay faithful, and
+    /// commented out with `note` for every other dialect rather than
+    /// silently dropped.
+    DialectSpecificBlock {
+        raw_sql: String,
+        note: String,
     },
     /// Pass-through for DML and other statements where the syntax
     /// is identical (or close enough) across dialects (e.g., UPDATE, DELETE)
